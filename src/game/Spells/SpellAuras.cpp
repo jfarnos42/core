@@ -6713,6 +6713,19 @@ void SpellAuraHolder::_AddSpellAuraHolder()
     if (!m_target)
         return;
 
+    // AzerothLife: refill Hunger/Thirst when a player consumes food/drink.
+    // Food/drink applies its regen aura once on consume; this is that hook.
+    // Guard: this function also runs while auras are re-applied from
+    // character_aura at login (_LoadAuras -> AddSpellAuraHolder). Skip the
+    // refill in that path, or logging out mid-eat would grant a free refill on
+    // the next login when the food aura is reloaded.
+    if (Player* pTargetPlayer = m_target->ToPlayer())
+    {
+        WorldSession const* session = pTargetPlayer->GetSession();
+        if (session && !session->PlayerLoading())
+            pTargetPlayer->HandleNeedsConsumeSpell(m_spellProto);
+    }
+
     // Try find slot for aura
     uint8 slot = NULL_AURA_SLOT;
     Unit* caster = GetCaster();

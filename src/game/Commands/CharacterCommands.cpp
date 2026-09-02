@@ -4320,6 +4320,67 @@ bool ChatHandler::HandleModifyExhaustionCommand(char* args)
     return true;
 }
 
+// AzerothLife: Hunger & Thirst needs system (Phase 1).
+//   .needs                              -> show self/selected player's needs
+//   .needs set <hunger|thirst> <0-100>  -> set a need value (clamped), for testing
+bool ChatHandler::HandleNeedsCommand(char* args)
+{
+    Player* target = GetSelectedPlayer();
+    if (!target)
+        target = m_session ? m_session->GetPlayer() : nullptr;
+
+    if (!target)
+    {
+        SendSysMessage(LANG_PLAYER_NOT_FOUND);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    // .needs set <hunger|thirst> <0-100>
+    if (ExtractLiteralArg(&args, "set"))
+    {
+        NeedType type;
+        if (ExtractLiteralArg(&args, "hunger"))
+            type = NEED_HUNGER;
+        else if (ExtractLiteralArg(&args, "thirst"))
+            type = NEED_THIRST;
+        else
+        {
+            SendSysMessage("Usage: .needs set <hunger|thirst> <0-100>");
+            SetSentErrorMessage(true);
+            return false;
+        }
+
+        uint32 value;
+        if (!ExtractUInt32(&args, value))
+        {
+            SendSysMessage("Usage: .needs set <hunger|thirst> <0-100>");
+            SetSentErrorMessage(true);
+            return false;
+        }
+
+        target->SetNeedValue(type, int32(value));   // clamps to 0-100 internally
+
+        uint8 const newValue = target->GetNeedValue(type);
+        PSendSysMessage("Set %s's %s to %u/100 (%s).",
+            target->GetName(),
+            type == NEED_HUNGER ? "hunger" : "thirst",
+            newValue,
+            Player::GetNeedLevelName(type, Player::GetNeedLevel(newValue)));
+        return true;
+    }
+
+    // .needs -> print current values and level names
+    uint8 const hunger = target->GetHunger();
+    uint8 const thirst = target->GetThirst();
+    PSendSysMessage("Needs for %s:", target->GetName());
+    PSendSysMessage("  Hunger: %u/100 (%s)", hunger,
+        Player::GetNeedLevelName(NEED_HUNGER, Player::GetNeedLevel(hunger)));
+    PSendSysMessage("  Thirst: %u/100 (%s)", thirst,
+        Player::GetNeedLevelName(NEED_THIRST, Player::GetNeedLevel(thirst)));
+    return true;
+}
+
 static uint32 ReputationRankStrIndex[MAX_REPUTATION_RANK] =
 {
     LANG_REP_HATED,    LANG_REP_HOSTILE, LANG_REP_UNFRIENDLY, LANG_REP_NEUTRAL,

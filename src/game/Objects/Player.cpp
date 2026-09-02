@@ -110,8 +110,13 @@ static uint32 copseReclaimDelay[MAX_DEATH_COUNT] = { 30, 60, 120 };
 Player::Player(WorldSession* session) : Unit(),
     m_mover(this), m_camera(this), m_reputationMgr(this), m_saveDisabled(false), m_enableInstanceSwitch(true),
     m_currentTicketCounter(0), m_repopAtGraveyardPending(false), m_knownLanguagesMask(0),
-    m_honorMgr(this), m_personalXpRate(-1.0f), m_isStandUpScheduled(false), m_foodEmoteTimer(0)
+    m_honorMgr(this), m_personalXpRate(-1.0f), m_isStandUpScheduled(false), m_foodEmoteTimer(0),
+    m_needsDecayTimer(0)
 {
+    // AzerothLife: needs (Hunger & Thirst) start full; real values loaded on login.
+    m_needs[NEED_HUNGER] = 100;
+    m_needs[NEED_THIRST] = 100;
+
     m_objectType |= TYPEMASK_PLAYER;
     m_objectTypeId = TYPEID_PLAYER;
 
@@ -1274,6 +1279,9 @@ void Player::Update(uint32 update_diff, uint32 p_time)
         m_playedTime[PLAYED_TIME_LEVEL] += elapsed;        // Level played time
         m_lastTick = now;
     }
+
+    // AzerothLife: Hunger & Thirst decay (online only; Update only runs in-world).
+    UpdateNeeds(update_diff);
 
     if (m_drunk)
     {
@@ -4082,6 +4090,269 @@ void Player::_SaveSpellCooldowns() const
             stmt.Execute();
         }
     }
+}
+
+/*********************************************************/
+/***     NEEDS SYSTEM (Hunger & Thirst) - AzerothLife  ***/
+/*********************************************************/
+//
+// Phase 1 spike: two persistent 0-100 meters per character (Hunger, Thirst),
+// online-only decay, refill on eating/drinking, and chat notifications when a
+// meter crosses a level boundary. No gameplay auras/effects yet (Phase 2).
+//
+// ALL of the numbers below are PLACEHOLDERS to be fixed by balance in Phase 3
+// (see the `TBD` markers in docs/design/needs.md). They are grouped here on
+// purpose so they are trivial to tune later.
+namespace
+{
+    // --- Level band boundaries (inclusive lower bound of each level) ---------
+    // Five even 20-point bands.
+    // Level 0 Starving/Dehydrated : 0  .. 19
+    // Level 1 Hungry/Thirsty      : 20 .. 39
+    // Level 2 Normal (no notice)  : 40 .. 59
+    // Level 3 Well Fed/Hydrated   : 60 .. 79
+    // Level 4 Sated/Quenched      : 80 .. 100
+    constexpr uint8 NEEDS_BAND_LOW_MIN    = 20;   // >= this leaves Starving
+    constexpr uint8 NEEDS_BAND_NORMAL_MIN = 40;   // >= this is Normal
+    constexpr uint8 NEEDS_BAND_HIGH_MIN   = 60;   // >= this is Well Fed/Hydrated
+    constexpr uint8 NEEDS_BAND_FULL_MIN   = 80;   // >= this is Sated/Quenched
+    constexpr uint8 NEEDS_MAX_VALUE       = 100;
+
+    // --- Decay (online / played time only) -----------------------------------
+    // How long a full meter (100) takes to reach empty (0) in played minutes.
+    constexpr uint32 NEEDS_DECAY_MINUTES_FULL_TO_EMPTY = 120;   // 2h of played time
+    // Derived: milliseconds of Update time per 1 point of decay.
+    constexpr uint32 NEEDS_DECAY_MS_PER_POINT =
+        NEEDS_DECAY_MINUTES_FULL_TO_EMPTY * 60u * 1000u / NEEDS_MAX_VALUE;
+
+    // --- Refill on consuming food/drink --------------------------------------
+    // Flat amount added to the matching meter per food/drink spell consumed.
+    // TODO(Phase 3): scale by item tier (a loaf < a banquet). Flat for now.
+    constexpr int32 NEEDS_REFILL_ON_CONSUME = 25;   // placeholder
+
+    // --- Custom state-aura spells (Spell.dbc 60000-60003) --------------------
+    // Only the two extreme levels of each meter carry an aura; levels 2-4 do
+    // not. These IDs are defined in Spell.dbc by the parallel DBC workstream;
+    // until that lands a missing entry simply logs a warning at runtime.
+    // Magnitudes are tuned server-side (Phase 3), never in code.
+    constexpr uint32 NEEDS_SPELL_STARVING   = 60000;   // Hunger min (--stats)
+    constexpr uint32 NEEDS_SPELL_SATED      = 60001;   // Hunger max (++stats)
+    constexpr uint32 NEEDS_SPELL_DEHYDRATED = 60002;   // Thirst min (--regen)
+    constexpr uint32 NEEDS_SPELL_QUENCHED   = 60003;   // Thirst max (++regen)
+
+    // Returns the state-aura spell a meter carries at `level`, or 0 for the
+    // three middle levels (which never carry an effect aura).
+    uint32 GetNeedStateSpell(NeedType type, NeedLevel level)
+    {
+        if (level == NEED_LEVEL_STARVING)
+            return (type == NEED_THIRST) ? NEEDS_SPELL_DEHYDRATED : NEEDS_SPELL_STARVING;
+        if (level == NEED_LEVEL_FULL)
+            return (type == NEED_THIRST) ? NEEDS_SPELL_QUENCHED : NEEDS_SPELL_SATED;
+        return 0;
+    }
+
+    // True for any of the 4 system-managed needs state auras. Used to keep them
+    // out of character_aura persistence (they are re-applied from the meters).
+    bool IsNeedsStateSpell(uint32 spellId)
+    {
+        return spellId >= NEEDS_SPELL_STARVING && spellId <= NEEDS_SPELL_QUENCHED;
+    }
+
+    // --- In-game level names (English, per style guide) ----------------------
+    char const* const s_hungerLevelNames[MAX_NEED_LEVEL] =
+    { "Starving", "Hungry", "Normal", "Well Fed", "Sated" };
+    char const* const s_thirstLevelNames[MAX_NEED_LEVEL] =
+    { "Dehydrated", "Thirsty", "Normal", "Well Hydrated", "Quenched" };
+
+    // --- Chat notifications on crossing INTO a level (RP tone, placeholder) ---
+    // TODO(content): final RP copy is written separately (see needs.md TBD).
+    char const* const s_hungerLevelMessages[MAX_NEED_LEVEL] =
+    {
+        "You are starving. Your body aches for sustenance.",   // Starving
+        "Your stomach growls.",                                // Hungry
+        "Your hunger settles to a comfortable level.",         // Normal
+        "You feel well fed and content.",                      // Well Fed
+        "You are pleasantly sated.",                           // Sated
+    };
+    char const* const s_thirstLevelMessages[MAX_NEED_LEVEL] =
+    {
+        "You are parched. Your throat is dry as dust.",        // Dehydrated
+        "Your throat feels dry.",                              // Thirsty
+        "Your thirst eases to a comfortable level.",           // Normal
+        "You feel well hydrated.",                             // Well Hydrated
+        "Your thirst is fully quenched.",                      // Quenched
+    };
+}
+
+NeedLevel Player::GetNeedLevel(uint8 value)
+{
+    if (value < NEEDS_BAND_LOW_MIN)
+        return NEED_LEVEL_STARVING;
+    if (value < NEEDS_BAND_NORMAL_MIN)
+        return NEED_LEVEL_LOW;
+    if (value < NEEDS_BAND_HIGH_MIN)
+        return NEED_LEVEL_NORMAL;
+    if (value < NEEDS_BAND_FULL_MIN)
+        return NEED_LEVEL_HIGH;
+    return NEED_LEVEL_FULL;
+}
+
+char const* Player::GetNeedLevelName(NeedType type, NeedLevel level)
+{
+    if (level >= MAX_NEED_LEVEL)
+        return "";
+    return (type == NEED_THIRST) ? s_thirstLevelNames[level] : s_hungerLevelNames[level];
+}
+
+void Player::SetNeedValue(NeedType type, int32 value)
+{
+    if (type >= MAX_NEED_TYPE)
+        return;
+
+    // Clamp to the valid 0-100 range.
+    if (value < 0)
+        value = 0;
+    else if (value > NEEDS_MAX_VALUE)
+        value = NEEDS_MAX_VALUE;
+
+    uint8 const oldValue = m_needs[type];
+    uint8 const newValue = uint8(value);
+    if (newValue == oldValue)
+        return;
+
+    NeedLevel const oldLevel = GetNeedLevel(oldValue);
+    NeedLevel const newLevel = GetNeedLevel(newValue);
+    m_needs[type] = newValue;
+
+    // Notify the player and reconcile the state aura only when the value
+    // crosses into a different level. Routing the aura through here means every
+    // path that changes a meter (decay, food/drink refill, the `.needs set` GM
+    // command) automatically keeps the extreme auras in sync.
+    if (newLevel != oldLevel)
+    {
+        char const* msg = (type == NEED_THIRST) ? s_thirstLevelMessages[newLevel]
+                                                : s_hungerLevelMessages[newLevel];
+        SendSysMessage(msg);
+
+        ReconcileNeedAura(type, newLevel);
+    }
+}
+
+void Player::ReconcileNeedAura(NeedType type, NeedLevel level)
+{
+    if (type >= MAX_NEED_TYPE)
+        return;
+
+    // A meter owns exactly two extreme auras and may carry at most one of them
+    // (hunger: Starving XOR Sated; thirst: Dehydrated XOR Quenched). Reconcile
+    // from the target level rather than tracking deltas: drop both, then apply
+    // the one the new level wants (if any).
+    uint32 const minSpell = GetNeedStateSpell(type, NEED_LEVEL_STARVING);
+    uint32 const maxSpell = GetNeedStateSpell(type, NEED_LEVEL_FULL);
+    uint32 const wanted   = GetNeedStateSpell(type, level);
+
+    if (wanted != minSpell)
+        RemoveAurasDueToSpell(minSpell);
+    if (wanted != maxSpell)
+        RemoveAurasDueToSpell(maxSpell);
+
+    if (!wanted || HasAura(wanted))
+        return;
+
+    // The 4 spells are added to Spell.dbc by a parallel workstream; tolerate a
+    // missing entry so the server still boots and plays until the DBC lands.
+    if (!sSpellMgr.GetSpellEntry(wanted))
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "NEEDS: state spell %u missing from Spell.dbc; aura not applied.", wanted);
+        return;
+    }
+
+    // Triggered self-cast: no reagents, no GCD, no line-of-sight. The spells
+    // carry an infinite duration in DBC, so we never set a duration in code.
+    CastSpell(this, wanted, true);
+}
+
+void Player::ApplyNeedAurasOnLogin()
+{
+    for (uint8 t = 0; t < MAX_NEED_TYPE; ++t)
+        ReconcileNeedAura(NeedType(t), GetNeedLevel(m_needs[t]));
+}
+
+void Player::ModifyNeedValue(NeedType type, int32 delta)
+{
+    if (type >= MAX_NEED_TYPE)
+        return;
+    SetNeedValue(type, int32(m_needs[type]) + delta);
+}
+
+void Player::HandleNeedsConsumeSpell(SpellEntry const* spellInfo)
+{
+    if (!spellInfo)
+        return;
+
+    switch (Spells::GetSpellSpecific(spellInfo->Id))
+    {
+        case SPELL_FOOD:
+            ModifyNeedValue(NEED_HUNGER, NEEDS_REFILL_ON_CONSUME);
+            break;
+        case SPELL_DRINK:
+            ModifyNeedValue(NEED_THIRST, NEEDS_REFILL_ON_CONSUME);
+            break;
+        case SPELL_FOOD_AND_DRINK:
+            ModifyNeedValue(NEED_HUNGER, NEEDS_REFILL_ON_CONSUME);
+            ModifyNeedValue(NEED_THIRST, NEEDS_REFILL_ON_CONSUME);
+            break;
+        default:
+            break;
+    }
+}
+
+void Player::UpdateNeeds(uint32 update_diff)
+{
+    // Online-only decay: Player::Update only runs for in-world players.
+    m_needsDecayTimer += update_diff;
+    if (m_needsDecayTimer < NEEDS_DECAY_MS_PER_POINT)
+        return;
+
+    uint32 const points = m_needsDecayTimer / NEEDS_DECAY_MS_PER_POINT;
+    m_needsDecayTimer -= points * NEEDS_DECAY_MS_PER_POINT;
+
+    ModifyNeedValue(NEED_HUNGER, -int32(points));
+    ModifyNeedValue(NEED_THIRST, -int32(points));
+}
+
+void Player::_LoadNeeds(std::unique_ptr<QueryResult> result)
+{
+    // SELECT `hunger`, `thirst` FROM `character_needs` WHERE `guid` = ?
+    // No row (new character) keeps the constructor defaults (full).
+    if (!result)
+        return;
+
+    Field* fields = result->Fetch();
+    uint32 hunger = fields[0].GetUInt32();
+    uint32 thirst = fields[1].GetUInt32();
+
+    if (hunger > NEEDS_MAX_VALUE)
+        hunger = NEEDS_MAX_VALUE;
+    if (thirst > NEEDS_MAX_VALUE)
+        thirst = NEEDS_MAX_VALUE;
+
+    m_needs[NEED_HUNGER] = uint8(hunger);
+    m_needs[NEED_THIRST] = uint8(thirst);
+}
+
+void Player::_SaveNeeds() const
+{
+    static SqlStatementID replaceNeeds;
+
+    SqlStatement stmt = CharacterDatabase.CreateStatement(replaceNeeds,
+        "REPLACE INTO `character_needs` (`guid`, `hunger`, `thirst`, `last_update`) VALUES(?, ?, ?, ?)");
+    stmt.addUInt32(GetGUIDLow());
+    stmt.addUInt32(m_needs[NEED_HUNGER]);
+    stmt.addUInt32(m_needs[NEED_THIRST]);
+    stmt.addUInt32(uint32(time(nullptr)));
+    stmt.Execute();
 }
 
 void Player::UpdateResetTalentsMultiplier() const
@@ -15136,6 +15407,9 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder* holder)
 
     _LoadSpellCooldowns(holder->TakeResult(PLAYER_LOGIN_QUERY_LOADSPELLCOOLDOWNS));
 
+    // AzerothLife: load Hunger & Thirst needs.
+    _LoadNeeds(holder->TakeResult(PLAYER_LOGIN_QUERY_LOADNEEDS));
+
     // Spell code allow apply any auras to dead character in load time in aura/spell/item loading
     // Do now before stats re-calculation cleanup for ghost state unexpected auras
     if (!IsAlive())
@@ -16602,6 +16876,7 @@ void Player::SaveToDB(bool online, bool force)
     _SaveQuestStatus();
     _SaveSpells();
     _SaveSpellCooldowns();
+    _SaveNeeds();   // AzerothLife: persist Hunger & Thirst
     _SaveAuras();
     _SaveSkills();
     m_reputationMgr.SaveToDB();
@@ -16709,6 +16984,12 @@ void Player::_SaveAuras()
 
 bool Player::SaveAura(SpellAuraHolder const* holder, AuraSaveStruct& saveStruct)
 {
+    // AzerothLife: never persist the system-managed needs state auras. They are
+    // re-applied from character_needs on login (ApplyNeedAurasOnLogin), so
+    // saving them to character_aura would double-apply / desync them.
+    if (IsNeedsStateSpell(holder->GetSpellProto()->Id))
+        return false;
+
     // Do not save these auras to database.
     if (holder->GetSpellProto()->HasAuraInterruptFlag(SpellAuraInterruptFlags(AURA_INTERRUPT_LEAVE_WORLD_CANCELS | AURA_INTERRUPT_ENTER_WORLD_CANCELS)))
         return false;

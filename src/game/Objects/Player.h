@@ -631,8 +631,29 @@ enum PlayerLoginQueryIndex
     PLAYER_LOGIN_QUERY_LOADMAILEDITEMS,
     PLAYER_LOGIN_QUERY_BATTLEGROUND_DATA,
     PLAYER_LOGIN_QUERY_FORGOTTEN_SKILLS,
+    PLAYER_LOGIN_QUERY_LOADNEEDS,               // AzerothLife: Hunger & Thirst needs system
 
     MAX_PLAYER_LOGIN_QUERY
+};
+
+// AzerothLife: Hunger & Thirst needs system (Phase 1).
+// Each need (hunger, thirst) is an integer 0-100 mapped to one of these 5
+// discrete levels. See docs/design/needs.md for the design.
+enum NeedType
+{
+    NEED_HUNGER = 0,
+    NEED_THIRST = 1,
+    MAX_NEED_TYPE
+};
+
+enum NeedLevel
+{
+    NEED_LEVEL_STARVING = 0,    // extreme low  (Starving / Dehydrated)
+    NEED_LEVEL_LOW      = 1,    // low          (Hungry / Thirsty)
+    NEED_LEVEL_NORMAL   = 2,    // default      (no notification aura)
+    NEED_LEVEL_HIGH     = 3,    // high         (Well Fed / Well Hydrated)
+    NEED_LEVEL_FULL     = 4,    // extreme high (Sated / Quenched)
+    MAX_NEED_LEVEL
 };
 
 enum PlayerDelayedOperations
@@ -1383,6 +1404,37 @@ class Player final: public Unit
         void _LoadSpellCooldowns(std::unique_ptr<QueryResult> result);
         void _SaveSpellCooldowns() const;
 
+        /*********************************************************/
+        /***     NEEDS SYSTEM (Hunger & Thirst) - AzerothLife  ***/
+        /*********************************************************/
+    public:
+        uint8 GetNeedValue(NeedType type) const { return m_needs[type]; }
+        uint8 GetHunger() const { return m_needs[NEED_HUNGER]; }
+        uint8 GetThirst() const { return m_needs[NEED_THIRST]; }
+        // Sets a need to an absolute 0-100 value (clamped). Sends a chat
+        // notification if the change crosses into a different level.
+        void SetNeedValue(NeedType type, int32 value);
+        // Raises the matching need(s) when a food/drink spell is consumed.
+        void HandleNeedsConsumeSpell(SpellEntry const* spellInfo);
+        static NeedLevel GetNeedLevel(uint8 value);
+        static char const* GetNeedLevelName(NeedType type, NeedLevel level);
+        // Re-applies the correct state aura(s) for the currently loaded meter
+        // values. Called once after login, when the player is in world.
+        void ApplyNeedAurasOnLogin();
+    private:
+        void _LoadNeeds(std::unique_ptr<QueryResult> result);
+        void _SaveNeeds() const;
+        void UpdateNeeds(uint32 update_diff);   // online-only decay tick
+        // Applies a signed delta to a need and notifies on level crossing.
+        void ModifyNeedValue(NeedType type, int32 delta);
+        // Reconciles one meter's extreme state aura to match `level`: removes
+        // both of the meter's auras, then applies the one for `level` (if it is
+        // an extreme level). Idempotent; drives mutual exclusivity per meter.
+        void ReconcileNeedAura(NeedType type, NeedLevel level);
+        uint8 m_needs[MAX_NEED_TYPE];
+        uint32 m_needsDecayTimer;               // ms accumulator for decay
+
+    public:
         template <typename F>
         void RemoveSomeCooldown(F check)
         {

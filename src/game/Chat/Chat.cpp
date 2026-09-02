@@ -1204,6 +1204,7 @@ ChatCommand * ChatHandler::getCommandTable()
         { "list",           SEC_TICKETMASTER,   true, nullptr,                                         "", listCommandTable     },
         { "lookup",         SEC_MODERATOR,      true, nullptr,                                         "", lookupCommandTable   },
         { "modify",         SEC_TICKETMASTER,   false, nullptr,                                        "", modifyCommandTable   },
+        { "needs",          SEC_GAMEMASTER,     false, &ChatHandler::HandleNeedsCommand,               "", nullptr              },
         { "npc",            SEC_MODERATOR,      false, nullptr,                                        "", npcCommandTable      },
         { "unit",           SEC_MODERATOR,      false, nullptr,                                        "", unitCommandTable     },
         { "pool",           SEC_GAMEMASTER,     true, nullptr,                                         "", poolCommandTable     },
