@@ -967,6 +967,9 @@ void Creature::Update(uint32 update_diff, uint32 diff)
             if (!IsAlive())
                 break;
 
+            // AzerothLife (2.0b): wound de-escalation / expiry sync for creatures.
+            UpdateWounds(update_diff);
+
             float hpPercent = GetHealthPercent();
             ModifyAuraState(AURA_STATE_HEALTHLESS_15_PERCENT, hpPercent < 16.0f);
             ModifyAuraState(AURA_STATE_HEALTHLESS_10_PERCENT, hpPercent < 11.0f);

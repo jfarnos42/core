@@ -301,6 +301,28 @@ struct ProcTriggeredData
 
 typedef std::vector<ProcTriggeredData> ProcTriggeredList;
 
+// AzerothLife: Wounds system (2.0b). A melee/ranged hit can open a wound on an
+// eligible victim depending on the attacker's weapon sub-type and the victim's
+// armour class. See docs/design/wounds.md. Wounds are transient (not persisted).
+enum WoundDamageType
+{
+    WOUND_DMG_NONE = 0,     // wands, fishing poles, non-weapons: never wound
+    WOUND_DMG_SLASHING,     // swords, axes            -> Bleed
+    WOUND_DMG_PIERCING,     // daggers, polearms, ranged -> Bleed (better vs armour)
+    WOUND_DMG_BLUNT,        // maces, staves, unarmed  -> Concussion
+    WOUND_DMG_HYBRID,       // fist weapons            -> both rolls
+};
+
+// Categorical armour class of the victim (majority of equipped pieces).
+enum WoundArmorClass
+{
+    WOUND_ARMOR_CLOTH = 0,
+    WOUND_ARMOR_LEATHER,
+    WOUND_ARMOR_MAIL,
+    WOUND_ARMOR_PLATE,
+    MAX_WOUND_ARMOR
+};
+
 class Unit : public SpellCaster
 {
     public:
@@ -990,6 +1012,38 @@ class Unit : public SpellCaster
         void CalculateMeleeDamage(Unit* pVictim, uint32 damage, CalcDamageInfo* damageInfo, WeaponAttackType attackType = BASE_ATTACK);
         void UnitDamaged(ObjectGuid from, uint32 damage) { m_damageTakenHistory[from] += damage; m_lastDamageTaken = 0; }
         void DealMeleeDamage(CalcDamageInfo const* damageInfo, bool durabilityLoss);
+
+        /*********************************************************/
+        /***     WOUNDS SYSTEM (Bleed & Concussion) - AzerothLife */
+        /*********************************************************/
+    public:
+        // Rolls wounds on the victim after a landed weapon hit. Called on the
+        // attacker from DealMeleeDamage. Uses damageInfo->totalDamage as the
+        // Bleed snapshot. No-op for ineligible attacker/victim pairs.
+        void HandleWoundsOnMeleeHit(CalcDamageInfo const* damageInfo);
+        // Natural de-escalation / expiry sync tick. Called from Player::Update
+        // and Creature::Update.
+        void UpdateWounds(uint32 update_diff);
+        // Directly force a wound (GM/debug). snapshotDamage is the base hit the
+        // Bleed DoT snapshots (0 = use a nominal test amount).
+        void InflictWound(WoundDamageType dmgType, uint32 snapshotDamage);
+        uint8 GetBleedPhase() const { return m_bleedPhase; }
+        uint8 GetConcussionPhase() const { return m_concussionPhase; }
+        // True for units that can inflict or receive wounds: players, plus
+        // Humanoid and Beast creatures. Everything else is immune.
+        static bool IsWoundEligible(Unit const* unit);
+        WoundArmorClass GetMajorityArmorClass() const;
+    private:
+        WoundDamageType GetWeaponWoundType(WeaponAttackType attackType) const;
+        float GetArmorMitigationFraction(Unit const* victim) const;
+        void ApplyBleedProc(uint32 snapshotHitDamage);
+        void ApplyConcussionProc(Unit* attacker);
+        void ReconcileBleedPhase(uint8 newPhase, uint32 perTickDamage);
+        void ReconcileConcussionPhase(uint8 newPhase);
+        uint8  m_bleedPhase;                 // 0 none, 1 Minor, 2 Deep, 3 Hemorrhage
+        uint8  m_concussionPhase;            // 0 none, 1 Rattled, 2 Concussed
+        uint32 m_lastKnockoutTime;           // ms timestamp of last Knockout (ICD)
+    public:
         float CalculateDamage(WeaponAttackType attType, bool normalized, uint8 index = 0) const;
         float MeleeDamageBonusTaken(SpellCaster const* pCaster, float pdamage, WeaponAttackType attType, SpellEntry const* spellProto = nullptr, SpellEffectIndex effectIndex = EFFECT_INDEX_0, DamageEffectType damagetype = DIRECT_DAMAGE, uint32 stack = 1, Spell* spell = nullptr, bool flat = true);
         MeleeHitOutcome RollMeleeOutcomeAgainst(Unit const* pVictim, WeaponAttackType attType) const;

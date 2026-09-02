@@ -632,6 +632,7 @@ enum PlayerLoginQueryIndex
     PLAYER_LOGIN_QUERY_BATTLEGROUND_DATA,
     PLAYER_LOGIN_QUERY_FORGOTTEN_SKILLS,
     PLAYER_LOGIN_QUERY_LOADNEEDS,               // AzerothLife: Hunger & Thirst needs system
+    PLAYER_LOGIN_QUERY_LOADDISEASES,            // AzerothLife: Wounds & Diseases (2.0b)
 
     MAX_PLAYER_LOGIN_QUERY
 };
@@ -654,6 +655,24 @@ enum NeedLevel
     NEED_LEVEL_HIGH     = 3,    // high         (Well Fed / Well Hydrated)
     NEED_LEVEL_FULL     = 4,    // extreme high (Sated / Quenched)
     MAX_NEED_LEVEL
+};
+
+// AzerothLife: Diseases system (2.0b). Long-lived infections contracted from
+// creatures, unhealthy zones or infected wounds. Persisted in character_diseases
+// (unlike Wounds). disease_id is the canonical base spell entry (60030..60036);
+// Festering(60030) escalates in-place to Sepsis(60031) via `stage`, so Sepsis is
+// not its own disease_id. See docs/design/diseases.md.
+struct DiseaseData
+{
+    uint32 diseaseId = 0;       // canonical base spell (60030,60032,60033,60034,60035,60036)
+    uint8  stage = 1;           // severity stage (1 = first)
+    uint32 contractedAt = 0;    // unix time contracted
+    uint32 incubationEnd = 0;   // unix time symptoms begin (0 = already active)
+    uint32 nextProgressAt = 0;  // unix time it next worsens (0 = static/at max)
+    uint32 lastUpdate = 0;      // unix time of last update/save
+    // runtime-only (not persisted):
+    uint32 recoveryAccumMs = 0; // accumulated natural-recovery progress
+    bool   auraApplied = false; // symptom aura currently on the player
 };
 
 enum PlayerDelayedOperations
@@ -1433,6 +1452,35 @@ class Player final: public Unit
         void ReconcileNeedAura(NeedType type, NeedLevel level);
         uint8 m_needs[MAX_NEED_TYPE];
         uint32 m_needsDecayTimer;               // ms accumulator for decay
+
+        /*********************************************************/
+        /***     DISEASES SYSTEM (2.0b) - AzerothLife          ***/
+        /*********************************************************/
+    public:
+        bool HasDisease(uint32 diseaseId) const;
+        // Contracts a disease if not already carried: creates its row with an
+        // incubation window; symptoms (aura) start when incubation ends.
+        // skipIncubation makes symptoms appear at once (GM/debug convenience).
+        void ContractDisease(uint32 diseaseId, bool skipIncubation = false);
+        // Re-applies symptom auras for diseases past incubation. Called on login.
+        void ApplyDiseaseAurasOnLogin();
+        // Disease exposure vectors:
+        void HandleDiseaseExposureFromCreature(Creature* attacker); // per-hit
+        // Needs bridges (disease sabotage), queried from HandleNeedsConsumeSpell:
+        bool HasNausea() const;       // Filth Fever: eating does not refill Hunger
+        bool HasHydrophobia() const;  // Rabies: drinking does not refill Thirst
+    private:
+        void _LoadDiseases(std::unique_ptr<QueryResult> result);
+        void _SaveDiseases() const;
+        void UpdateDiseases(uint32 update_diff);
+        void RollDiseaseExposure(uint32 diseaseId, float baseChance);
+        float GetDiseaseHungerMultiplier() const;   // Hungry x2, Starving x3
+        void ReconcileDiseaseAura(DiseaseData& d);   // apply/swap symptom aura
+        void RemoveDisease(uint32 diseaseId);
+        DiseaseData* GetDisease(uint32 diseaseId);
+        std::vector<DiseaseData> m_diseases;
+        uint32 m_diseaseEnvTimer;                    // ms accumulator, zone/wound vectors
+        uint32 m_diseaseUpdateTimer;                 // ms accumulator, progress/recovery
 
     public:
         template <typename F>

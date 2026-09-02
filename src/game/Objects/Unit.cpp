@@ -180,6 +180,11 @@ Unit::Unit()
 
     m_isCreatureLinkingTrigger = false;
     m_isSpawningLinked = false;
+
+    // AzerothLife: wounds start clear; they are transient and never loaded.
+    m_bleedPhase = 0;
+    m_concussionPhase = 0;
+    m_lastKnockoutTime = 0;
 }
 
 Unit::~Unit()
@@ -1285,6 +1290,98 @@ void Unit::PetOwnerKilledUnit(Unit* pVictim)
     CallForAllControlledUnits(PetOwnerKilledUnitHelper(pVictim), CONTROLLED_MINIPET | CONTROLLED_GUARDIANS);
 }
 
+// AzerothLife (2.0b): tunable constants + helpers for the Wounds system. Placed
+// here (before CalculateMeleeDamage) so the blunt-vs-plate damage bonus can use
+// them. The Unit::* wound method bodies are further down (after DealMeleeDamage).
+namespace
+{
+    // --- Spell IDs (fixed by Workstream A; live in Spell.dbc + spell_template) -
+    constexpr uint32 WOUND_SPELL_BLEED_MINOR      = 60010;
+    constexpr uint32 WOUND_SPELL_BLEED_DEEP       = 60011;
+    constexpr uint32 WOUND_SPELL_BLEED_HEMORRHAGE = 60012;
+    constexpr uint32 WOUND_SPELL_CONCUSSION_RATTLED  = 60020;
+    constexpr uint32 WOUND_SPELL_CONCUSSION_CONCUSSED = 60021;
+    constexpr uint32 WOUND_SPELL_KNOCKOUT         = 60022;
+
+    // --- Proc chance model ---------------------------------------------------
+    constexpr float WOUND_BASE_CHANCE = 0.20f;   // BASE, before matrix/armour
+    constexpr float WOUND_ARMOR_WEIGHT = 0.50f;  // how much armour value bites
+    constexpr float WOUND_MIN_CHANCE = 0.03f;    // floor so nothing is ever 0%
+    constexpr uint32 WOUND_ARMOR_MIT_SAMPLE = 10000; // nominal dmg to read the
+                                                     // armour mitigation curve
+
+    // Matrix multiplier [profile][armour]. Profile index:
+    // 0 = slashing, 1 = piercing, 2 = blunt.
+    constexpr float WOUND_MATRIX[3][MAX_WOUND_ARMOR] =
+    {
+        // Cloth  Leather  Mail   Plate
+        { 1.00f,  0.85f,  0.40f, 0.15f }, // Slashing -> Bleed
+        { 1.00f,  0.90f,  0.70f, 0.55f }, // Piercing -> Bleed
+        { 1.00f,  0.70f,  0.65f, 1.20f }, // Blunt    -> Concussion
+    };
+
+    // --- Bleed DoT: per-tick damage = % of the snapshot hit, per phase --------
+    // Index by phase (1..3); [0] unused.
+    constexpr uint32 WOUND_BLEED_TICK_PCT[4] = { 0, 10, 16, 25 };
+
+    // --- Blunt vs Plate: flat extra physical damage on every hit --------------
+    constexpr float WOUND_BLUNT_VS_PLATE_BONUS = 0.15f; // +15%
+
+    // --- Knockout internal cooldown (belt-and-braces on top of DR) -----------
+    constexpr uint32 WOUND_KNOCKOUT_ICD_MS = 10000;
+
+    uint32 BleedSpellForPhase(uint8 phase)
+    {
+        switch (phase)
+        {
+            case 1: return WOUND_SPELL_BLEED_MINOR;
+            case 2: return WOUND_SPELL_BLEED_DEEP;
+            case 3: return WOUND_SPELL_BLEED_HEMORRHAGE;
+            default: return 0;
+        }
+    }
+
+    uint32 ConcussionSpellForPhase(uint8 phase)
+    {
+        switch (phase)
+        {
+            case 1: return WOUND_SPELL_CONCUSSION_RATTLED;
+            case 2: return WOUND_SPELL_CONCUSSION_CONCUSSED;
+            default: return 0;
+        }
+    }
+
+    // Maps a weapon item subclass to a wound damage profile.
+    WoundDamageType WoundTypeFromWeaponSubclass(uint32 subclass)
+    {
+        switch (subclass)
+        {
+            case ITEM_SUBCLASS_WEAPON_SWORD:
+            case ITEM_SUBCLASS_WEAPON_SWORD2:
+            case ITEM_SUBCLASS_WEAPON_AXE:
+            case ITEM_SUBCLASS_WEAPON_AXE2:
+                return WOUND_DMG_SLASHING;
+            case ITEM_SUBCLASS_WEAPON_DAGGER:
+            case ITEM_SUBCLASS_WEAPON_POLEARM:
+            case ITEM_SUBCLASS_WEAPON_SPEAR:
+            case ITEM_SUBCLASS_WEAPON_BOW:
+            case ITEM_SUBCLASS_WEAPON_GUN:
+            case ITEM_SUBCLASS_WEAPON_CROSSBOW:
+            case ITEM_SUBCLASS_WEAPON_THROWN:
+                return WOUND_DMG_PIERCING;
+            case ITEM_SUBCLASS_WEAPON_MACE:
+            case ITEM_SUBCLASS_WEAPON_MACE2:
+            case ITEM_SUBCLASS_WEAPON_STAFF:
+            case ITEM_SUBCLASS_WEAPON_MISC:
+                return WOUND_DMG_BLUNT;
+            case ITEM_SUBCLASS_WEAPON_FIST:
+                return WOUND_DMG_HYBRID;
+            default: // wand, fishing pole, obsolete, exotic
+                return WOUND_DMG_NONE;
+        }
+    }
+}
+
 void Unit::CalculateMeleeDamage(Unit* pVictim, uint32 damage, CalcDamageInfo* damageInfo, WeaponAttackType attackType)
 {
     damageInfo->attacker = this;
@@ -1357,6 +1454,18 @@ void Unit::CalculateMeleeDamage(Unit* pVictim, uint32 damage, CalcDamageInfo* da
         }
 
         damageInfo->totalDamage += subDamage->damage;
+    }
+
+    // AzerothLife (2.0b): blunt weapons hit harder against plate-armoured foes
+    // ("the mace dents the plate"). Applied here so it flows through crit and
+    // into the Bleed snapshot. See docs/design/wounds.md Decision 3b.
+    if (damageInfo->totalDamage && IsWoundEligible(this) && IsWoundEligible(pVictim) &&
+        GetWeaponWoundType(attackType) == WOUND_DMG_BLUNT &&
+        pVictim->GetMajorityArmorClass() == WOUND_ARMOR_PLATE)
+    {
+        uint32 bonus = uint32(damageInfo->subDamage[0].damage * WOUND_BLUNT_VS_PLATE_BONUS);
+        damageInfo->subDamage[0].damage += bonus;
+        damageInfo->totalDamage += bonus;
     }
 
     // Physical Immune check
@@ -1698,6 +1807,304 @@ void Unit::DealMeleeDamage(CalcDamageInfo const* damageInfo, bool durabilityLoss
 
         // victim's damage shield
         TriggerDamageShields(pVictim);
+
+        // AzerothLife (2.0b): roll wounds from this hit, and expose the victim
+        // to any disease this attacker carries (creature vector).
+        if (damageInfo->totalDamage && pVictim->IsAlive())
+        {
+            HandleWoundsOnMeleeHit(damageInfo);
+
+            if (IsCreature())
+                if (Player* victimPlayer = pVictim->ToPlayer())
+                    victimPlayer->HandleDiseaseExposureFromCreature(static_cast<Creature*>(this));
+        }
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// AzerothLife: Wounds system (2.0b) - Bleed & Concussion.
+//
+// A landed weapon hit may open a wound on an eligible victim. The attacker's
+// weapon sub-type picks the wound family (slashing/piercing -> Bleed, blunt ->
+// Concussion, fist -> both); the victim's majority armour class and armour
+// value scale the proc chance. See docs/design/wounds.md. All numbers below are
+// grouped named constants so balance can tune them trivially (Workstream F).
+// The tunable constants and helpers live in the anonymous namespace just above
+// Unit::CalculateMeleeDamage (they are needed there for the blunt-vs-plate bonus).
+//////////////////////////////////////////////////////////////////////////////
+
+// static
+bool Unit::IsWoundEligible(Unit const* unit)
+{
+    if (!unit)
+        return false;
+    if (unit->IsPlayer())
+        return true;
+    if (unit->IsCreature())
+    {
+        CreatureInfo const* ci = static_cast<Creature const*>(unit)->GetCreatureInfo();
+        return ci && (ci->type == CREATURE_TYPE_HUMANOID || ci->type == CREATURE_TYPE_BEAST);
+    }
+    return false;
+}
+
+WoundDamageType Unit::GetWeaponWoundType(WeaponAttackType attackType) const
+{
+    if (IsPlayer())
+    {
+        Item* weapon = static_cast<Player const*>(this)->GetWeaponForAttack(attackType, true, true);
+        if (!weapon)
+            return WOUND_DMG_BLUNT;   // unarmed fists strike blunt
+        return WoundTypeFromWeaponSubclass(weapon->GetProto()->SubClass);
+    }
+
+    if (IsCreature())
+    {
+        Creature const* creature = static_cast<Creature const*>(this);
+        CreatureInfo const* ci = creature->GetCreatureInfo();
+        // Beasts always bleed (claws/fangs), regardless of any virtual weapon.
+        if (ci && ci->type == CREATURE_TYPE_BEAST)
+            return WOUND_DMG_SLASHING;
+        // Humanoids wound by the weapon they wield (virtual item), else unarmed.
+        if (creature->GetVirtualItemClass(attackType) == ITEM_CLASS_WEAPON)
+            return WoundTypeFromWeaponSubclass(creature->GetVirtualItemSubclass(attackType));
+        return WOUND_DMG_BLUNT;
+    }
+
+    return WOUND_DMG_NONE;
+}
+
+WoundArmorClass Unit::GetMajorityArmorClass() const
+{
+    // Non-players (and unequipped players) count as the most vulnerable class.
+    if (!IsPlayer())
+        return WOUND_ARMOR_CLOTH;
+
+    Player const* player = static_cast<Player const*>(this);
+    static uint8 const s_slots[8] =
+    {
+        EQUIPMENT_SLOT_HEAD, EQUIPMENT_SLOT_SHOULDERS, EQUIPMENT_SLOT_CHEST,
+        EQUIPMENT_SLOT_WAIST, EQUIPMENT_SLOT_LEGS, EQUIPMENT_SLOT_FEET,
+        EQUIPMENT_SLOT_WRISTS, EQUIPMENT_SLOT_HANDS
+    };
+
+    uint32 counts[MAX_WOUND_ARMOR] = { 0, 0, 0, 0 };
+    for (uint8 slot : s_slots)
+    {
+        Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        if (!item)
+            continue;
+        ItemPrototype const* proto = item->GetProto();
+        if (!proto || proto->Class != ITEM_CLASS_ARMOR)
+            continue;
+        switch (proto->SubClass)
+        {
+            case ITEM_SUBCLASS_ARMOR_CLOTH:   ++counts[WOUND_ARMOR_CLOTH];   break;
+            case ITEM_SUBCLASS_ARMOR_LEATHER: ++counts[WOUND_ARMOR_LEATHER]; break;
+            case ITEM_SUBCLASS_ARMOR_MAIL:    ++counts[WOUND_ARMOR_MAIL];    break;
+            case ITEM_SUBCLASS_ARMOR_PLATE:   ++counts[WOUND_ARMOR_PLATE];   break;
+            default: break; // misc/shields/etc do not vote on class
+        }
+    }
+
+    // Highest count wins; ties break towards the heavier class (iterate up).
+    WoundArmorClass best = WOUND_ARMOR_CLOTH;
+    uint32 bestCount = 0;
+    for (uint8 i = 0; i < MAX_WOUND_ARMOR; ++i)
+    {
+        if (counts[i] >= bestCount && counts[i] > 0)
+        {
+            bestCount = counts[i];
+            best = WoundArmorClass(i);
+        }
+    }
+    return best;
+}
+
+float Unit::GetArmorMitigationFraction(Unit const* victim) const
+{
+    // Reuse the physical armour curve: fraction of a nominal hit it removes.
+    float reduced = CalcArmorReducedDamage(victim, WOUND_ARMOR_MIT_SAMPLE);
+    float frac = 1.0f - reduced / float(WOUND_ARMOR_MIT_SAMPLE);
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    return frac;
+}
+
+void Unit::HandleWoundsOnMeleeHit(CalcDamageInfo const* damageInfo)
+{
+    if (!damageInfo || !damageInfo->totalDamage)
+        return;
+
+    Unit* victim = damageInfo->target;
+    if (!victim || !victim->IsAlive())
+        return;
+
+    if (!IsWoundEligible(this) || !IsWoundEligible(victim))
+        return;
+
+    WoundDamageType wt = GetWeaponWoundType(damageInfo->attackType);
+    if (wt == WOUND_DMG_NONE)
+        return;
+
+    WoundArmorClass ac = victim->GetMajorityArmorClass();
+    float mit = GetArmorMitigationFraction(victim);
+    uint32 const snapshot = damageInfo->totalDamage;
+
+    auto rollProfile = [&](uint8 profileIdx) -> bool
+    {
+        float chance = WOUND_BASE_CHANCE * WOUND_MATRIX[profileIdx][ac] *
+                       (1.0f - mit * WOUND_ARMOR_WEIGHT);
+        if (chance < WOUND_MIN_CHANCE)
+            chance = WOUND_MIN_CHANCE;
+        return roll_chance_f(chance * 100.0f);
+    };
+
+    // Bleed side (slashing/piercing, and the slashing half of hybrid).
+    if (wt == WOUND_DMG_SLASHING || wt == WOUND_DMG_PIERCING || wt == WOUND_DMG_HYBRID)
+    {
+        uint8 profileIdx = (wt == WOUND_DMG_PIERCING) ? 1 : 0;
+        if (rollProfile(profileIdx))
+            victim->ApplyBleedProc(snapshot);
+    }
+
+    // Concussion side (blunt, and the blunt half of hybrid).
+    if (wt == WOUND_DMG_BLUNT || wt == WOUND_DMG_HYBRID)
+    {
+        if (rollProfile(2))
+            victim->ApplyConcussionProc(this);
+    }
+}
+
+void Unit::ApplyBleedProc(uint32 snapshotHitDamage)
+{
+    uint8 newPhase = (m_bleedPhase < 3) ? uint8(m_bleedPhase + 1) : 3;
+    uint32 perTick = snapshotHitDamage * WOUND_BLEED_TICK_PCT[newPhase] / 100;
+    if (perTick < 1)
+        perTick = 1;
+    ReconcileBleedPhase(newPhase, perTick);
+}
+
+void Unit::ApplyConcussionProc(Unit* attacker)
+{
+    // Concussed is the "primed" state: a fresh proc fires the Knockout stun,
+    // gated by an internal cooldown on top of vMaNGOS diminishing returns.
+    if (m_concussionPhase >= 2)
+    {
+        uint32 now = WorldTimer::getMSTime();
+        if (attacker && WorldTimer::getMSTimeDiff(m_lastKnockoutTime, now) >= WOUND_KNOCKOUT_ICD_MS)
+        {
+            m_lastKnockoutTime = now;
+            // Triggered cast routes through the stun DR group automatically
+            // (Knockout mechanic == MECHANIC_STUN), so chained hits do not
+            // chain-stun a player. The persistent Concussed aura stays.
+            if (sSpellMgr.GetSpellEntry(WOUND_SPELL_KNOCKOUT))
+                attacker->CastSpell(this, WOUND_SPELL_KNOCKOUT, true);
+        }
+        ReconcileConcussionPhase(2); // refresh Concussed
+        return;
+    }
+    ReconcileConcussionPhase(uint8(m_concussionPhase + 1));
+}
+
+void Unit::ReconcileBleedPhase(uint8 newPhase, uint32 perTickDamage)
+{
+    // Drop every Bleed aura, then apply the wanted phase with its snapshot.
+    RemoveAurasDueToSpell(WOUND_SPELL_BLEED_MINOR);
+    RemoveAurasDueToSpell(WOUND_SPELL_BLEED_DEEP);
+    RemoveAurasDueToSpell(WOUND_SPELL_BLEED_HEMORRHAGE);
+
+    m_bleedPhase = newPhase;
+    if (!newPhase)
+        return;
+
+    uint32 spellId = BleedSpellForPhase(newPhase);
+    if (!sSpellMgr.GetSpellEntry(spellId))
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "WOUNDS: Bleed spell %u missing from Spell.dbc; aura not applied.", spellId);
+        m_bleedPhase = 0;
+        return;
+    }
+
+    // Snapshot the per-tick damage into the periodic effect's base points.
+    // perTickDamage == 0 means a no-damage recovery marker (out-of-combat
+    // de-escalation), so the wound lingers visually but cannot kill.
+    CastCustomSpell(this, spellId, int32(perTickDamage), {}, {}, true);
+}
+
+void Unit::ReconcileConcussionPhase(uint8 newPhase)
+{
+    RemoveAurasDueToSpell(WOUND_SPELL_CONCUSSION_RATTLED);
+    RemoveAurasDueToSpell(WOUND_SPELL_CONCUSSION_CONCUSSED);
+
+    m_concussionPhase = newPhase;
+    if (!newPhase)
+        return;
+
+    uint32 spellId = ConcussionSpellForPhase(newPhase);
+    if (!sSpellMgr.GetSpellEntry(spellId))
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "WOUNDS: Concussion spell %u missing from Spell.dbc; aura not applied.", spellId);
+        m_concussionPhase = 0;
+        return;
+    }
+    CastSpell(this, spellId, true);
+}
+
+void Unit::UpdateWounds(uint32 /*update_diff*/)
+{
+    if (!m_bleedPhase && !m_concussionPhase)
+        return;
+
+    // Bleed cascade: when the current phase aura has expired (not refreshed by
+    // a new hit), de-escalate one phase as a no-damage recovery marker, or clear
+    // it entirely at phase 1. This keeps a grave wound "present" while healing
+    // naturally, and prevents out-of-combat bleed deaths.
+    if (m_bleedPhase)
+    {
+        if (!HasAura(BleedSpellForPhase(m_bleedPhase)))
+        {
+            if (m_bleedPhase > 1)
+                ReconcileBleedPhase(uint8(m_bleedPhase - 1), 0); // marker, no damage
+            else
+                m_bleedPhase = 0;
+        }
+    }
+
+    // Concussion cascade: Concussed -> Rattled -> clear as the debuff expires.
+    if (m_concussionPhase)
+    {
+        if (!HasAura(ConcussionSpellForPhase(m_concussionPhase)))
+        {
+            if (m_concussionPhase > 1)
+                ReconcileConcussionPhase(uint8(m_concussionPhase - 1));
+            else
+                m_concussionPhase = 0;
+        }
+    }
+}
+
+void Unit::InflictWound(WoundDamageType dmgType, uint32 snapshotDamage)
+{
+    if (snapshotDamage == 0)
+        snapshotDamage = 200; // nominal test hit for the GM command
+    switch (dmgType)
+    {
+        case WOUND_DMG_SLASHING:
+        case WOUND_DMG_PIERCING:
+            ApplyBleedProc(snapshotDamage);
+            break;
+        case WOUND_DMG_BLUNT:
+            ApplyConcussionProc(this);
+            break;
+        case WOUND_DMG_HYBRID:
+            ApplyBleedProc(snapshotDamage);
+            ApplyConcussionProc(this);
+            break;
+        default:
+            break;
     }
 }
 

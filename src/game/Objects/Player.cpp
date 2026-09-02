@@ -111,7 +111,7 @@ Player::Player(WorldSession* session) : Unit(),
     m_mover(this), m_camera(this), m_reputationMgr(this), m_saveDisabled(false), m_enableInstanceSwitch(true),
     m_currentTicketCounter(0), m_repopAtGraveyardPending(false), m_knownLanguagesMask(0),
     m_honorMgr(this), m_personalXpRate(-1.0f), m_isStandUpScheduled(false), m_foodEmoteTimer(0),
-    m_needsDecayTimer(0)
+    m_needsDecayTimer(0), m_diseaseEnvTimer(0), m_diseaseUpdateTimer(0)
 {
     // AzerothLife: needs (Hunger & Thirst) start full; real values loaded on login.
     m_needs[NEED_HUNGER] = 100;
@@ -1282,6 +1282,10 @@ void Player::Update(uint32 update_diff, uint32 p_time)
 
     // AzerothLife: Hunger & Thirst decay (online only; Update only runs in-world).
     UpdateNeeds(update_diff);
+
+    // AzerothLife (2.0b): wound de-escalation + disease incubation/progression.
+    UpdateWounds(update_diff);
+    UpdateDiseases(update_diff);
 
     if (m_drunk)
     {
@@ -4291,17 +4295,27 @@ void Player::HandleNeedsConsumeSpell(SpellEntry const* spellInfo)
     if (!spellInfo)
         return;
 
+    // AzerothLife (2.0b): disease sabotage bridges. Filth Fever suppresses
+    // hunger (Nausea) and Rabies suppresses thirst (Hydrophobia): the matching
+    // meter is not refilled while the disease is active.
+    bool const blockHunger = HasNausea();
+    bool const blockThirst = HasHydrophobia();
+
     switch (Spells::GetSpellSpecific(spellInfo->Id))
     {
         case SPELL_FOOD:
-            ModifyNeedValue(NEED_HUNGER, NEEDS_REFILL_ON_CONSUME);
+            if (!blockHunger)
+                ModifyNeedValue(NEED_HUNGER, NEEDS_REFILL_ON_CONSUME);
             break;
         case SPELL_DRINK:
-            ModifyNeedValue(NEED_THIRST, NEEDS_REFILL_ON_CONSUME);
+            if (!blockThirst)
+                ModifyNeedValue(NEED_THIRST, NEEDS_REFILL_ON_CONSUME);
             break;
         case SPELL_FOOD_AND_DRINK:
-            ModifyNeedValue(NEED_HUNGER, NEEDS_REFILL_ON_CONSUME);
-            ModifyNeedValue(NEED_THIRST, NEEDS_REFILL_ON_CONSUME);
+            if (!blockHunger)
+                ModifyNeedValue(NEED_HUNGER, NEEDS_REFILL_ON_CONSUME);
+            if (!blockThirst)
+                ModifyNeedValue(NEED_THIRST, NEEDS_REFILL_ON_CONSUME);
             break;
         default:
             break;
@@ -4353,6 +4367,347 @@ void Player::_SaveNeeds() const
     stmt.addUInt32(m_needs[NEED_THIRST]);
     stmt.addUInt32(uint32(time(nullptr)));
     stmt.Execute();
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// AzerothLife: Diseases system (2.0b).
+//
+// Long-lived infections (see docs/design/diseases.md). Contracted from three
+// vectors (carrier creature per-hit, unhealthy zone tick, infected wound tick),
+// modulated by the player's Hunger band. Each disease incubates ~10 min before
+// symptoms (its aura) appear; Festering and The Plague then worsen over ~1 h.
+// A disease also heals slowly on its own, faster while resting out of combat and
+// while Sated; caring for yourself also halts progression. Persisted in
+// character_diseases. All numbers are grouped named constants (Workstream F).
+//////////////////////////////////////////////////////////////////////////////
+namespace
+{
+    // --- Canonical disease ids = base spell entries (Workstream A) -----------
+    constexpr uint32 DISEASE_SPELL_FESTERING    = 60030; // -> Sepsis at stage 2
+    constexpr uint32 DISEASE_SPELL_SEPSIS       = 60031; // stage-2 aura of 60030
+    constexpr uint32 DISEASE_SPELL_SPIDER_VENOM = 60032;
+    constexpr uint32 DISEASE_SPELL_RABIES       = 60033;
+    constexpr uint32 DISEASE_SPELL_FILTH_FEVER  = 60034;
+    constexpr uint32 DISEASE_SPELL_MARSH_FEVER  = 60035;
+    constexpr uint32 DISEASE_SPELL_PLAGUE       = 60036;
+
+    // --- Exposure chances (per roll, before Hunger multiplier) ---------------
+    constexpr float DISEASE_CHANCE_CREATURE = 0.01f;   // per hit taken
+    constexpr float DISEASE_CHANCE_ZONE     = 0.02f;   // per env tick
+    constexpr float DISEASE_CHANCE_WOUND    = 0.02f;   // per env tick, grave bleed
+
+    // --- Hunger multiplier (Needs bridge) ------------------------------------
+    constexpr float DISEASE_HUNGER_MULT_HUNGRY   = 2.0f;
+    constexpr float DISEASE_HUNGER_MULT_STARVING = 3.0f;
+
+    // --- Timers --------------------------------------------------------------
+    constexpr uint32 DISEASE_ENV_TICK_MS    = 30000;   // zone/wound roll cadence
+    constexpr uint32 DISEASE_UPDATE_TICK_MS = 5000;    // incubation/progress/recovery
+    constexpr uint32 DISEASE_INCUBATION_SEC = 600;     // 10 min asymptomatic
+    constexpr uint32 DISEASE_PROGRESS_SEC   = 3600;    // 1 h per severity step
+    // Base natural-recovery time (accumulated ms of "healing" to cure). The
+    // effective time is shorter while resting/Sated (rate stacks below).
+    constexpr uint32 DISEASE_RECOVERY_THRESHOLD_MS = 7200000; // ~2 h base
+
+    // Highest severity stage a disease reaches.
+    uint8 DiseaseMaxStage(uint32 diseaseId)
+    {
+        if (diseaseId == DISEASE_SPELL_FESTERING) return 2; // Festering -> Sepsis
+        if (diseaseId == DISEASE_SPELL_PLAGUE)    return 4; // The Plague levels
+        return 1;                                           // static diseases
+    }
+
+    bool IsProgressiveDisease(uint32 diseaseId)
+    {
+        return diseaseId == DISEASE_SPELL_FESTERING || diseaseId == DISEASE_SPELL_PLAGUE;
+    }
+
+    // The symptom aura for a disease at a given stage. Only Festering swaps its
+    // aura (to Sepsis at stage 2); The Plague keeps 60036 across its stages
+    // (per-stage magnitude scaling is a balance item, see the core report).
+    uint32 DiseaseAuraSpell(uint32 diseaseId, uint8 stage)
+    {
+        if (diseaseId == DISEASE_SPELL_FESTERING)
+            return (stage >= 2) ? DISEASE_SPELL_SEPSIS : DISEASE_SPELL_FESTERING;
+        return diseaseId;
+    }
+
+    // -------------------------------------------------------------------------
+    // Workstream E data seam (owned by the PM). These map a carrier creature or
+    // an unhealthy zone/area to the disease it can transmit. They return 0 (no
+    // vector) until the PM wires the content data. See the core report for the
+    // recommended shape (aux tables `al_disease_creature` / `al_disease_zone`).
+    // -------------------------------------------------------------------------
+    uint32 GetCreatureVectorDisease(Creature const* /*attacker*/)
+    {
+        return 0; // TODO(Workstream E): map creature_template.entry -> disease id
+    }
+
+    uint32 GetZoneVectorDisease(uint32 /*zoneId*/, uint32 /*areaId*/)
+    {
+        return 0; // TODO(Workstream E): map zone/area id -> disease id
+    }
+}
+
+bool Player::HasDisease(uint32 diseaseId) const
+{
+    for (DiseaseData const& d : m_diseases)
+        if (d.diseaseId == diseaseId)
+            return true;
+    return false;
+}
+
+DiseaseData* Player::GetDisease(uint32 diseaseId)
+{
+    for (DiseaseData& d : m_diseases)
+        if (d.diseaseId == diseaseId)
+            return &d;
+    return nullptr;
+}
+
+bool Player::HasNausea() const
+{
+    // Filth Fever active -> eating does not refill Hunger.
+    return HasAura(DISEASE_SPELL_FILTH_FEVER);
+}
+
+bool Player::HasHydrophobia() const
+{
+    // Rabies active -> drinking does not refill Thirst.
+    return HasAura(DISEASE_SPELL_RABIES);
+}
+
+float Player::GetDiseaseHungerMultiplier() const
+{
+    switch (GetNeedLevel(GetHunger()))
+    {
+        case NEED_LEVEL_STARVING: return DISEASE_HUNGER_MULT_STARVING;
+        case NEED_LEVEL_LOW:      return DISEASE_HUNGER_MULT_HUNGRY;
+        default:                  return 1.0f;
+    }
+}
+
+void Player::ContractDisease(uint32 diseaseId, bool skipIncubation)
+{
+    if (!diseaseId || HasDisease(diseaseId))
+        return; // cannot re-contract a disease already carried
+
+    uint32 const now = uint32(time(nullptr));
+    DiseaseData d;
+    d.diseaseId      = diseaseId;
+    d.stage          = 1;
+    d.contractedAt   = now;
+    d.incubationEnd  = skipIncubation ? now : now + DISEASE_INCUBATION_SEC;
+    d.nextProgressAt = IsProgressiveDisease(diseaseId)
+        ? d.incubationEnd + DISEASE_PROGRESS_SEC : 0;
+    d.lastUpdate     = now;
+    d.recoveryAccumMs = 0;
+    d.auraApplied    = false;
+    m_diseases.push_back(d);
+
+    // Apply symptoms at once when incubation is skipped (GM/debug).
+    if (skipIncubation)
+        ReconcileDiseaseAura(m_diseases.back());
+}
+
+void Player::RollDiseaseExposure(uint32 diseaseId, float baseChance)
+{
+    if (!diseaseId || HasDisease(diseaseId))
+        return;
+    float chance = baseChance * GetDiseaseHungerMultiplier();
+    if (roll_chance_f(chance * 100.0f))
+        ContractDisease(diseaseId);
+}
+
+void Player::HandleDiseaseExposureFromCreature(Creature* attacker)
+{
+    if (!attacker)
+        return;
+    if (uint32 diseaseId = GetCreatureVectorDisease(attacker))
+        RollDiseaseExposure(diseaseId, DISEASE_CHANCE_CREATURE);
+}
+
+void Player::ReconcileDiseaseAura(DiseaseData& d)
+{
+    // Swap to the aura for the current stage (Festering family may change spell).
+    if (d.diseaseId == DISEASE_SPELL_FESTERING)
+    {
+        RemoveAurasDueToSpell(DISEASE_SPELL_FESTERING);
+        RemoveAurasDueToSpell(DISEASE_SPELL_SEPSIS);
+    }
+    else
+        RemoveAurasDueToSpell(d.diseaseId);
+
+    uint32 const spellId = DiseaseAuraSpell(d.diseaseId, d.stage);
+    if (!sSpellMgr.GetSpellEntry(spellId))
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "DISEASES: symptom spell %u missing from Spell.dbc; aura not applied.", spellId);
+        return;
+    }
+    CastSpell(this, spellId, true);
+    d.auraApplied = true;
+}
+
+void Player::RemoveDisease(uint32 diseaseId)
+{
+    for (size_t i = 0; i < m_diseases.size(); ++i)
+    {
+        if (m_diseases[i].diseaseId != diseaseId)
+            continue;
+        if (diseaseId == DISEASE_SPELL_FESTERING)
+        {
+            RemoveAurasDueToSpell(DISEASE_SPELL_FESTERING);
+            RemoveAurasDueToSpell(DISEASE_SPELL_SEPSIS);
+        }
+        else
+            RemoveAurasDueToSpell(diseaseId);
+        m_diseases.erase(m_diseases.begin() + i);
+        return;
+    }
+}
+
+void Player::ApplyDiseaseAurasOnLogin()
+{
+    uint32 const now = uint32(time(nullptr));
+    for (DiseaseData& d : m_diseases)
+        if (now >= d.incubationEnd)   // symptomatic: (re)apply the aura
+            ReconcileDiseaseAura(d);
+}
+
+void Player::UpdateDiseases(uint32 update_diff)
+{
+    // --- Environmental exposure vectors (slow cadence) -----------------------
+    m_diseaseEnvTimer += update_diff;
+    if (m_diseaseEnvTimer >= DISEASE_ENV_TICK_MS)
+    {
+        m_diseaseEnvTimer = 0;
+
+        // Unhealthy zone/area.
+        if (uint32 zoneDisease = GetZoneVectorDisease(GetZoneId(), GetAreaId()))
+            RollDiseaseExposure(zoneDisease, DISEASE_CHANCE_ZONE);
+
+        // Infected wound: a grave (phase 2+) bleed left untreated may fester.
+        if (GetBleedPhase() >= 2)
+            RollDiseaseExposure(DISEASE_SPELL_FESTERING, DISEASE_CHANCE_WOUND);
+    }
+
+    if (m_diseases.empty())
+        return;
+
+    // --- Incubation / progression / recovery (medium cadence) ----------------
+    m_diseaseUpdateTimer += update_diff;
+    if (m_diseaseUpdateTimer < DISEASE_UPDATE_TICK_MS)
+        return;
+    uint32 const tickMs = m_diseaseUpdateTimer;
+    m_diseaseUpdateTimer = 0;
+
+    uint32 const now = uint32(time(nullptr));
+    bool const outOfCombat = !IsInCombat();
+    bool const sated = HasAura(NEEDS_SPELL_SATED);
+    // Recovery rate stacks: base + resting (out of combat) + Sated.
+    uint32 const recoveryRate = 1 + (outOfCombat ? 1u : 0u) + (sated ? 1u : 0u);
+    // Actively caring for yourself (resting AND well-fed) also halts worsening.
+    bool const caring = outOfCombat && sated;
+
+    for (size_t i = 0; i < m_diseases.size(); )
+    {
+        DiseaseData& d = m_diseases[i];
+
+        // Incubation done -> symptoms begin.
+        if (!d.auraApplied && now >= d.incubationEnd)
+            ReconcileDiseaseAura(d);
+
+        if (d.auraApplied)
+        {
+            // Progression (only Festering->Sepsis and The Plague).
+            if (d.nextProgressAt && now >= d.nextProgressAt)
+            {
+                if (caring)
+                {
+                    d.nextProgressAt = now + DISEASE_PROGRESS_SEC; // frozen
+                }
+                else if (d.stage < DiseaseMaxStage(d.diseaseId))
+                {
+                    ++d.stage;
+                    ReconcileDiseaseAura(d);
+                    d.nextProgressAt = (d.stage < DiseaseMaxStage(d.diseaseId))
+                        ? now + DISEASE_PROGRESS_SEC : 0;
+                }
+                else
+                    d.nextProgressAt = 0; // capped
+            }
+
+            // Natural recovery.
+            d.recoveryAccumMs += tickMs * recoveryRate;
+            if (d.recoveryAccumMs >= DISEASE_RECOVERY_THRESHOLD_MS)
+            {
+                if (d.diseaseId == DISEASE_SPELL_FESTERING)
+                {
+                    RemoveAurasDueToSpell(DISEASE_SPELL_FESTERING);
+                    RemoveAurasDueToSpell(DISEASE_SPELL_SEPSIS);
+                }
+                else
+                    RemoveAurasDueToSpell(d.diseaseId);
+                m_diseases.erase(m_diseases.begin() + i);
+                continue;
+            }
+        }
+
+        d.lastUpdate = now;
+        ++i;
+    }
+}
+
+void Player::_LoadDiseases(std::unique_ptr<QueryResult> result)
+{
+    // SELECT disease_id, stage, contracted_at, incubation_end, next_progress_at,
+    //        last_update FROM character_diseases WHERE guid = ?
+    m_diseases.clear();
+    if (!result)
+        return;
+
+    do
+    {
+        Field* fields = result->Fetch();
+        DiseaseData d;
+        d.diseaseId      = fields[0].GetUInt32();
+        d.stage          = fields[1].GetUInt8();
+        d.contractedAt   = fields[2].GetUInt32();
+        d.incubationEnd  = fields[3].GetUInt32();
+        d.nextProgressAt = fields[4].GetUInt32();
+        d.lastUpdate     = fields[5].GetUInt32();
+        d.recoveryAccumMs = 0;
+        d.auraApplied    = false;
+        if (d.stage < 1)
+            d.stage = 1;
+        m_diseases.push_back(d);
+    } while (result->NextRow());
+}
+
+void Player::_SaveDiseases() const
+{
+    static SqlStatementID deleteDiseases;
+    static SqlStatementID insertDisease;
+
+    SqlStatement del = CharacterDatabase.CreateStatement(deleteDiseases,
+        "DELETE FROM `character_diseases` WHERE `guid` = ?");
+    del.PExecute(GetGUIDLow());
+
+    uint32 const now = uint32(time(nullptr));
+    for (DiseaseData const& d : m_diseases)
+    {
+        SqlStatement stmt = CharacterDatabase.CreateStatement(insertDisease,
+            "INSERT INTO `character_diseases` (`guid`, `disease_id`, `stage`, `contracted_at`, `incubation_end`, `next_progress_at`, `last_update`) VALUES(?, ?, ?, ?, ?, ?, ?)");
+        stmt.addUInt32(GetGUIDLow());
+        stmt.addUInt32(d.diseaseId);
+        stmt.addUInt8(d.stage);
+        stmt.addUInt32(d.contractedAt);
+        stmt.addUInt32(d.incubationEnd);
+        stmt.addUInt32(d.nextProgressAt);
+        stmt.addUInt32(now);
+        stmt.Execute();
+    }
 }
 
 void Player::UpdateResetTalentsMultiplier() const
@@ -15409,6 +15764,7 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder* holder)
 
     // AzerothLife: load Hunger & Thirst needs.
     _LoadNeeds(holder->TakeResult(PLAYER_LOGIN_QUERY_LOADNEEDS));
+    _LoadDiseases(holder->TakeResult(PLAYER_LOGIN_QUERY_LOADDISEASES)); // AzerothLife 2.0b
 
     // Spell code allow apply any auras to dead character in load time in aura/spell/item loading
     // Do now before stats re-calculation cleanup for ghost state unexpected auras
@@ -16877,6 +17233,7 @@ void Player::SaveToDB(bool online, bool force)
     _SaveSpells();
     _SaveSpellCooldowns();
     _SaveNeeds();   // AzerothLife: persist Hunger & Thirst
+    _SaveDiseases();   // AzerothLife 2.0b: persist Diseases
     _SaveAuras();
     _SaveSkills();
     m_reputationMgr.SaveToDB();
