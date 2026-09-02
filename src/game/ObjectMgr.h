@@ -148,6 +148,21 @@ typedef std::unordered_map<uint32, CreatureSpellsList> CreatureSpellsMap;
 typedef std::unordered_map<uint32, std::vector<CreatureClassLevelStats>> CreatureCLSMap;
 typedef std::unordered_map<uint32, EquipmentTemplate> CreatureEquipmentMap;
 
+// AzerothLife 2.0b (Workstream E): cached disease-sourcing data. A carrier
+// creature or an unhealthy zone/area maps to the base disease spell (6003x) it
+// transmits, with an optional per-mille chance (0 => core default constant).
+struct DiseaseVector
+{
+    uint32 diseaseId = 0;
+    uint16 chancePermille = 0;   // 0 = use the core default for this vector
+};
+// Creature carriers split by match kind so precedence entry > family > type is a
+// simple ordered lookup. Key = match_value (entry id / family id / type id).
+typedef std::unordered_map<uint32, DiseaseVector> DiseaseCreatureMap;
+// Zone carriers: key = (uint64(zone_id) << 32) | area_id; multiple diseases per
+// key are allowed (a zone can carry several), hence a multimap.
+typedef std::unordered_multimap<uint64, DiseaseVector> DiseaseZoneMap;
+
 typedef std::map<uint32/*player guid*/,uint32/*instance*/> CellCorpseSet;
 struct CellObjectGuids
 {
@@ -822,6 +837,46 @@ class ObjectMgr
             return nullptr;
         }
 
+        // AzerothLife 2.0b: resolve the disease a carrier creature transmits.
+        // Precedence: per-entry override > per-family > per-type (most specific
+        // wins). Returns nullptr when the creature carries nothing.
+        DiseaseVector const* GetCreatureVectorDisease(uint32 entry, uint32 family, uint32 type) const
+        {
+            auto itr = m_diseaseCreatureByEntry.find(entry);
+            if (itr != m_diseaseCreatureByEntry.end())
+                return &itr->second;
+            if (family)
+            {
+                itr = m_diseaseCreatureByFamily.find(family);
+                if (itr != m_diseaseCreatureByFamily.end())
+                    return &itr->second;
+            }
+            itr = m_diseaseCreatureByType.find(type);
+            if (itr != m_diseaseCreatureByType.end())
+                return &itr->second;
+            return nullptr;
+        }
+
+        // AzerothLife 2.0b: collect every disease an unhealthy zone/area carries.
+        // Exact (zone, area) rows take precedence; if none match, the (zone, 0)
+        // whole-zone wildcard rows are used. Appends to `out`.
+        void GetZoneVectorDiseases(uint32 zoneId, uint32 areaId, std::vector<DiseaseVector>& out) const
+        {
+            if (areaId)
+            {
+                uint64 const exactKey = (uint64(zoneId) << 32) | areaId;
+                auto range = m_diseaseZoneMap.equal_range(exactKey);
+                for (auto it = range.first; it != range.second; ++it)
+                    out.push_back(it->second);
+                if (!out.empty())
+                    return; // a specific area match suppresses the zone wildcard
+            }
+            uint64 const zoneKey = (uint64(zoneId) << 32);
+            auto range = m_diseaseZoneMap.equal_range(zoneKey);
+            for (auto it = range.first; it != range.second; ++it)
+                out.push_back(it->second);
+        }
+
         ReputationOnKillEntry const* GetReputationOnKillEntry(uint32 id) const
         {
             auto itr = m_RepOnKillMap.find(id);
@@ -949,6 +1004,7 @@ class ObjectMgr
         void LoadFishingBaseSkillLevel();
 
         void LoadReputationRewardRate();
+        void LoadDiseaseVectors();   // AzerothLife 2.0b: al_disease_creature/zone
         void LoadReputationOnKill();
         void LoadReputationSpilloverTemplate();
 
@@ -1511,6 +1567,12 @@ class ObjectMgr
         BGEntranceTriggerMap m_BGEntranceTriggersMap;
 
         RepRewardRateMap    m_RepRewardRateMap;
+
+        // AzerothLife 2.0b: cached disease-sourcing data (Workstream E).
+        DiseaseCreatureMap  m_diseaseCreatureByEntry;
+        DiseaseCreatureMap  m_diseaseCreatureByFamily;
+        DiseaseCreatureMap  m_diseaseCreatureByType;
+        DiseaseZoneMap      m_diseaseZoneMap;
         RepOnKillMap        m_RepOnKillMap;
         RepSpilloverTemplateMap m_RepSpilloverTemplateMap;
 

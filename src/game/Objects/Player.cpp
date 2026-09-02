@@ -4392,9 +4392,16 @@ namespace
     constexpr uint32 DISEASE_SPELL_PLAGUE       = 60036;
 
     // --- Exposure chances (per roll, before Hunger multiplier) ---------------
+    // Used as defaults when an al_disease_* row leaves chance_permille = 0.
     constexpr float DISEASE_CHANCE_CREATURE = 0.01f;   // per hit taken
-    constexpr float DISEASE_CHANCE_ZONE     = 0.02f;   // per env tick
+    constexpr float DISEASE_CHANCE_ENV      = 0.02f;   // per env tick (zone)
     constexpr float DISEASE_CHANCE_WOUND    = 0.02f;   // per env tick, grave bleed
+
+    // Converts a table per-mille value to a 0..1 chance; 0 => the given default.
+    float DiseaseChanceFromPermille(uint16 permille, float defaultChance)
+    {
+        return permille ? (permille / 1000.0f) : defaultChance;
+    }
 
     // --- Hunger multiplier (Needs bridge) ------------------------------------
     constexpr float DISEASE_HUNGER_MULT_HUNGRY   = 2.0f;
@@ -4423,8 +4430,8 @@ namespace
     }
 
     // The symptom aura for a disease at a given stage. Only Festering swaps its
-    // aura (to Sepsis at stage 2); The Plague keeps 60036 across its stages
-    // (per-stage magnitude scaling is a balance item, see the core report).
+    // aura (to Sepsis at stage 2); The Plague keeps 60036 across its stages but
+    // scales its effect magnitudes by stage (driven via CastCustomSpell bp).
     uint32 DiseaseAuraSpell(uint32 diseaseId, uint8 stage)
     {
         if (diseaseId == DISEASE_SPELL_FESTERING)
@@ -4432,21 +4439,12 @@ namespace
         return diseaseId;
     }
 
-    // -------------------------------------------------------------------------
-    // Workstream E data seam (owned by the PM). These map a carrier creature or
-    // an unhealthy zone/area to the disease it can transmit. They return 0 (no
-    // vector) until the PM wires the content data. See the core report for the
-    // recommended shape (aux tables `al_disease_creature` / `al_disease_zone`).
-    // -------------------------------------------------------------------------
-    uint32 GetCreatureVectorDisease(Creature const* /*attacker*/)
-    {
-        return 0; // TODO(Workstream E): map creature_template.entry -> disease id
-    }
-
-    uint32 GetZoneVectorDisease(uint32 /*zoneId*/, uint32 /*areaId*/)
-    {
-        return 0; // TODO(Workstream E): map zone/area id -> disease id
-    }
+    // --- The Plague (60036): per-stage effect magnitude multipliers ----------
+    // 60036 keeps one aura across its stages; the core scales its three effects
+    // (idx0 PERIODIC_DAMAGE, idx1 MOD_HEALING_PCT, idx2 MOD_PERCENT_STAT) by
+    // re-applying it with base points multiplied by this factor. Index by stage
+    // (1..PlagueMaxStage); [0] unused.
+    constexpr float DISEASE_PLAGUE_STAGE_MULT[5] = { 0.0f, 1.0f, 1.5f, 2.0f, 2.0f };
 }
 
 bool Player::HasDisease(uint32 diseaseId) const
@@ -4523,8 +4521,16 @@ void Player::HandleDiseaseExposureFromCreature(Creature* attacker)
 {
     if (!attacker)
         return;
-    if (uint32 diseaseId = GetCreatureVectorDisease(attacker))
-        RollDiseaseExposure(diseaseId, DISEASE_CHANCE_CREATURE);
+    CreatureInfo const* ci = attacker->GetCreatureInfo();
+    if (!ci)
+        return;
+    // Precedence entry > family > type is resolved inside the cached lookup.
+    DiseaseVector const* v = sObjectMgr.GetCreatureVectorDisease(
+        attacker->GetEntry(), ci->pet_family, ci->type);
+    if (!v)
+        return;
+    RollDiseaseExposure(v->diseaseId,
+        DiseaseChanceFromPermille(v->chancePermille, DISEASE_CHANCE_CREATURE));
 }
 
 void Player::ReconcileDiseaseAura(DiseaseData& d)
@@ -4539,12 +4545,31 @@ void Player::ReconcileDiseaseAura(DiseaseData& d)
         RemoveAurasDueToSpell(d.diseaseId);
 
     uint32 const spellId = DiseaseAuraSpell(d.diseaseId, d.stage);
-    if (!sSpellMgr.GetSpellEntry(spellId))
+    SpellEntry const* se = sSpellMgr.GetSpellEntry(spellId);
+    if (!se)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "DISEASES: symptom spell %u missing from Spell.dbc; aura not applied.", spellId);
         return;
     }
+
+    // The Plague (60036) keeps a single aura across its stages, so the core
+    // drives its worsening by re-applying it with the three effect magnitudes
+    // (idx0 DoT, idx1 -healing, idx2 -stats) scaled by the stage multiplier.
+    if (d.diseaseId == DISEASE_SPELL_PLAGUE)
+    {
+        uint8 s = d.stage;
+        if (s < 1) s = 1;
+        if (s > 4) s = 4;
+        float const mult = DISEASE_PLAGUE_STAGE_MULT[s];
+        int32 const bp0 = int32(se->EffectBasePoints[EFFECT_INDEX_0] * mult);
+        int32 const bp1 = int32(se->EffectBasePoints[EFFECT_INDEX_1] * mult);
+        int32 const bp2 = int32(se->EffectBasePoints[EFFECT_INDEX_2] * mult);
+        CastCustomSpell(this, spellId, bp0, bp1, bp2, true);
+        d.auraApplied = true;
+        return;
+    }
+
     CastSpell(this, spellId, true);
     d.auraApplied = true;
 }
@@ -4583,9 +4608,13 @@ void Player::UpdateDiseases(uint32 update_diff)
     {
         m_diseaseEnvTimer = 0;
 
-        // Unhealthy zone/area.
-        if (uint32 zoneDisease = GetZoneVectorDisease(GetZoneId(), GetAreaId()))
-            RollDiseaseExposure(zoneDisease, DISEASE_CHANCE_ZONE);
+        // Unhealthy zone/area: a zone may carry several diseases; roll each one
+        // independently (an already-carried disease is skipped inside the roll).
+        std::vector<DiseaseVector> zoneDiseases;
+        sObjectMgr.GetZoneVectorDiseases(GetZoneId(), GetAreaId(), zoneDiseases);
+        for (DiseaseVector const& v : zoneDiseases)
+            RollDiseaseExposure(v.diseaseId,
+                DiseaseChanceFromPermille(v.chancePermille, DISEASE_CHANCE_ENV));
 
         // Infected wound: a grave (phase 2+) bleed left untreated may fester.
         if (GetBleedPhase() >= 2)
