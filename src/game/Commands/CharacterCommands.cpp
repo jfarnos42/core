@@ -4395,6 +4395,15 @@ bool ChatHandler::HandleWoundCommand(char* args)
         return false;
     }
 
+    // .wound clear -> remove all wounds (bleed + concussion) from the target.
+    if (ExtractLiteralArg(&args, "clear") || ExtractLiteralArg(&args, "cure") ||
+        ExtractLiteralArg(&args, "none") || ExtractLiteralArg(&args, "remove"))
+    {
+        target->ClearWounds();
+        PSendSysMessage("Cleared all wounds from %s.", target->GetName());
+        return true;
+    }
+
     WoundDamageType type;
     if (ExtractLiteralArg(&args, "slashing") || ExtractLiteralArg(&args, "slash") || ExtractLiteralArg(&args, "bleed"))
         type = WOUND_DMG_SLASHING;
@@ -4406,7 +4415,7 @@ bool ChatHandler::HandleWoundCommand(char* args)
         type = WOUND_DMG_HYBRID;
     else
     {
-        SendSysMessage("Usage: .wound <bleed|slashing|piercing|blunt|concussion|fist>");
+        SendSysMessage("Usage: .wound <bleed|slashing|piercing|blunt|concussion|fist|clear>");
         SetSentErrorMessage(true);
         return false;
     }
@@ -4426,6 +4435,7 @@ bool ChatHandler::HandleWoundCommand(char* args)
 
 // AzerothLife (2.0b): .disease <id>  (id = base spell 60030/60032..60036)
 // Contracts a disease on the selected player (or self). Incubates then shows.
+// .disease clear [id] cures all diseases (or just <id>).
 bool ChatHandler::HandleDiseaseCommand(char* args)
 {
     Player* target = GetSelectedPlayer();
@@ -4438,10 +4448,32 @@ bool ChatHandler::HandleDiseaseCommand(char* args)
         return false;
     }
 
+    // .disease clear [id] -> cure all diseases, or just the given one.
+    if (ExtractLiteralArg(&args, "clear") || ExtractLiteralArg(&args, "cure"))
+    {
+        uint32 clearId;
+        if (ExtractUInt32(&args, clearId))
+        {
+            if (!target->HasDisease(clearId))
+            {
+                PSendSysMessage("%s does not carry disease %u.", target->GetName(), clearId);
+                return true;
+            }
+            target->CureDisease(clearId);
+            PSendSysMessage("Cured disease %u on %s.", clearId, target->GetName());
+        }
+        else
+        {
+            target->CureAllDiseases();
+            PSendSysMessage("Cured all diseases on %s.", target->GetName());
+        }
+        return true;
+    }
+
     uint32 diseaseId;
     if (!ExtractUInt32(&args, diseaseId))
     {
-        SendSysMessage("Usage: .disease <id> (60030 Festering, 60032 Spider Venom, 60033 Rabies, 60034 Filth Fever, 60035 Marsh Fever, 60036 The Plague)");
+        SendSysMessage("Usage: .disease <id> (60030 Festering, 60032 Spider Venom, 60033 Rabies, 60034 Filth Fever, 60035 Marsh Fever, 60036 The Plague) | .disease clear [id]");
         SetSentErrorMessage(true);
         return false;
     }

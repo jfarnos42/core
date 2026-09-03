@@ -4600,6 +4600,24 @@ void Player::ApplyDiseaseAurasOnLogin()
             ReconcileDiseaseAura(d);
 }
 
+void Player::CureDisease(uint32 diseaseId)
+{
+    // RemoveDisease drops the symptom aura AND erases the m_diseases entry, so
+    // the periodic aura re-sync has nothing left to reapply.
+    RemoveDisease(diseaseId);
+}
+
+void Player::CureAllDiseases()
+{
+    // Snapshot the ids first: RemoveDisease mutates m_diseases as it erases.
+    std::vector<uint32> ids;
+    ids.reserve(m_diseases.size());
+    for (DiseaseData const& d : m_diseases)
+        ids.push_back(d.diseaseId);
+    for (uint32 id : ids)
+        RemoveDisease(id);
+}
+
 void Player::UpdateDiseases(uint32 update_diff)
 {
     // --- Environmental exposure vectors (slow cadence) -----------------------

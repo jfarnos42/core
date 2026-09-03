@@ -1464,6 +1464,10 @@ class Player final: public Unit
         void ContractDisease(uint32 diseaseId, bool skipIncubation = false);
         // Re-applies symptom auras for diseases past incubation. Called on login.
         void ApplyDiseaseAurasOnLogin();
+        // GM cleanup: cure one disease / all diseases. Removes the symptom aura
+        // AND the character_diseases entry so the aura re-sync cannot reapply it.
+        void CureDisease(uint32 diseaseId);
+        void CureAllDiseases();
         // Disease exposure vectors:
         void HandleDiseaseExposureFromCreature(Creature* attacker); // per-hit
         // Needs bridges (disease sabotage), queried from HandleNeedsConsumeSpell:

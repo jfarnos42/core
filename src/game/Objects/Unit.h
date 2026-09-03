@@ -1031,6 +1031,9 @@ class Unit : public SpellCaster
         // Directly force a wound (GM/debug). snapshotDamage is the base hit the
         // Bleed DoT snapshots (0 = use a nominal test amount).
         void InflictWound(WoundDamageType dmgType, uint32 snapshotDamage);
+        // Removes all wounds (bleed + concussion + any active Knockout) and
+        // resets their state. GM cleanup helper.
+        void ClearWounds();
         uint8 GetBleedPhase() const { return m_bleedPhase; }
         uint8 GetConcussionPhase() const { return m_concussionPhase; }
         // True for units that can inflict or receive wounds: players, plus

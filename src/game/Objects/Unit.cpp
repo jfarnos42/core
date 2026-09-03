@@ -2120,6 +2120,14 @@ void Unit::InflictWound(WoundDamageType dmgType, uint32 snapshotDamage)
     }
 }
 
+void Unit::ClearWounds()
+{
+    ReconcileBleedPhase(0, 0);   // removes all bleed auras, sets phase 0
+    ReconcileConcussionPhase(0); // removes both concussion auras, sets phase 0
+    RemoveAurasDueToSpell(WOUND_SPELL_KNOCKOUT); // drop an in-progress Knockout
+    m_lastKnockoutTime = 0;
+}
+
 void Unit::TriggerDamageShields(Unit* pVictim)
 {
     std::set<Aura*> alreadyDone;
