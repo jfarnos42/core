@@ -1436,6 +1436,17 @@ void Spell::DoAllEffectOnTarget(TargetInfo *target)
 
         // Damage is done after procs so it can trigger auras on the victim that affect the caster in case of killing blow.
         pCaster->DealSpellDamage(&damageInfo, true);
+
+        // AzerothLife (2.0b): ranged weapon shots (auto-shot, Aimed/Multi-Shot,
+        // thrown) open Bleed wounds. Only the physical ranged-weapon path has
+        // attackType == RANGED_ATTACK; magic spells map to BASE_ATTACK and wands
+        // resolve to WOUND_DMG_NONE inside the pipeline, so both are ignored.
+        // This is separate from DealMeleeDamage, so there is no double roll.
+        if (m_attackType == RANGED_ATTACK && m_casterUnit &&
+            damageInfo.damage && unitTarget->IsAlive())
+        {
+            m_casterUnit->ApplyWoundsFromHit(unitTarget, RANGED_ATTACK, damageInfo.damage);
+        }
     }
     else if (m_canTrigger && (procAttacker || procVictim))
     {

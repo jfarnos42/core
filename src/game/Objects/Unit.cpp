@@ -1933,23 +1933,35 @@ float Unit::GetArmorMitigationFraction(Unit const* victim) const
 
 void Unit::HandleWoundsOnMeleeHit(CalcDamageInfo const* damageInfo)
 {
-    if (!damageInfo || !damageInfo->totalDamage)
+    if (!damageInfo)
+        return;
+    // Melee/off-hand path: the attacker is `this`, snapshot is the hit total.
+    ApplyWoundsFromHit(damageInfo->target, damageInfo->attackType, damageInfo->totalDamage);
+}
+
+// Shared wound pipeline for any landed weapon hit (melee, off-hand or ranged).
+// The attacker is `this`; `snapshotDamage` is the final damage this hit dealt
+// (used as the Bleed snapshot). Ranged shots reach here from the spell damage
+// path with attackType == RANGED_ATTACK, so bows/guns/crossbows/thrown resolve
+// to Piercing -> Bleed while wands (WOUND_DMG_NONE) are ignored.
+void Unit::ApplyWoundsFromHit(Unit* victim, WeaponAttackType attackType, uint32 snapshotDamage)
+{
+    if (!snapshotDamage)
         return;
 
-    Unit* victim = damageInfo->target;
     if (!victim || !victim->IsAlive())
         return;
 
     if (!IsWoundEligible(this) || !IsWoundEligible(victim))
         return;
 
-    WoundDamageType wt = GetWeaponWoundType(damageInfo->attackType);
+    WoundDamageType wt = GetWeaponWoundType(attackType);
     if (wt == WOUND_DMG_NONE)
         return;
 
     WoundArmorClass ac = victim->GetMajorityArmorClass();
     float mit = GetArmorMitigationFraction(victim);
-    uint32 const snapshot = damageInfo->totalDamage;
+    uint32 const snapshot = snapshotDamage;
 
     auto rollProfile = [&](uint8 profileIdx) -> bool
     {

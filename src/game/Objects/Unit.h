@@ -1021,6 +1021,10 @@ class Unit : public SpellCaster
         // attacker from DealMeleeDamage. Uses damageInfo->totalDamage as the
         // Bleed snapshot. No-op for ineligible attacker/victim pairs.
         void HandleWoundsOnMeleeHit(CalcDamageInfo const* damageInfo);
+        // Shared wound pipeline for any landed weapon hit (melee/off-hand from
+        // DealMeleeDamage, ranged from the spell damage path). `this` is the
+        // attacker; snapshotDamage is the final damage of the hit.
+        void ApplyWoundsFromHit(Unit* victim, WeaponAttackType attackType, uint32 snapshotDamage);
         // Natural de-escalation / expiry sync tick. Called from Player::Update
         // and Creature::Update.
         void UpdateWounds(uint32 update_diff);
