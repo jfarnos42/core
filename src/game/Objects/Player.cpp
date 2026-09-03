@@ -4643,9 +4643,17 @@ void Player::UpdateDiseases(uint32 update_diff)
     {
         DiseaseData& d = m_diseases[i];
 
-        // Incubation done -> symptoms begin.
-        if (!d.auraApplied && now >= d.incubationEnd)
-            ReconcileDiseaseAura(d);
+        // Incubation done -> symptoms begin. Also re-apply if the symptom aura
+        // was stripped externally (death removes debuffs; a Cure/Abolish Disease
+        // dispel): the disease is still carried, so its aura must return. This
+        // mirrors the HasAura() resync UpdateWounds does for bleeds. Guarded by
+        // IsAlive() so we do not churn casts on a ghost between death and revive.
+        if (IsAlive() && now >= d.incubationEnd)
+        {
+            uint32 const curAura = DiseaseAuraSpell(d.diseaseId, d.stage);
+            if (!d.auraApplied || !HasAura(curAura))
+                ReconcileDiseaseAura(d);
+        }
 
         if (d.auraApplied)
         {
