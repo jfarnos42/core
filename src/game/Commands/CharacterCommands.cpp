@@ -4381,6 +4381,91 @@ bool ChatHandler::HandleNeedsCommand(char* args)
     return true;
 }
 
+// AzerothLife (2.0b): .wound <bleed|slashing|piercing|blunt|concussion|fist>
+// Forces a wound on the selected unit (player or creature), or self.
+bool ChatHandler::HandleWoundCommand(char* args)
+{
+    Unit* target = GetSelectedUnit();
+    if (!target)
+        target = m_session ? m_session->GetPlayer() : nullptr;
+    if (!target)
+    {
+        SendSysMessage(LANG_PLAYER_NOT_FOUND);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    WoundDamageType type;
+    if (ExtractLiteralArg(&args, "slashing") || ExtractLiteralArg(&args, "slash") || ExtractLiteralArg(&args, "bleed"))
+        type = WOUND_DMG_SLASHING;
+    else if (ExtractLiteralArg(&args, "piercing") || ExtractLiteralArg(&args, "pierce"))
+        type = WOUND_DMG_PIERCING;
+    else if (ExtractLiteralArg(&args, "blunt") || ExtractLiteralArg(&args, "concussion") || ExtractLiteralArg(&args, "concuss"))
+        type = WOUND_DMG_BLUNT;
+    else if (ExtractLiteralArg(&args, "fist") || ExtractLiteralArg(&args, "hybrid"))
+        type = WOUND_DMG_HYBRID;
+    else
+    {
+        SendSysMessage("Usage: .wound <bleed|slashing|piercing|blunt|concussion|fist>");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    if (!Unit::IsWoundEligible(target))
+    {
+        SendSysMessage("Target cannot carry wounds (only players, Humanoid and Beast creatures).");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    target->InflictWound(type, 0 /* nominal test snapshot */);
+    PSendSysMessage("Applied wound to %s. Bleed phase %u, Concussion phase %u.",
+        target->GetName(), target->GetBleedPhase(), target->GetConcussionPhase());
+    return true;
+}
+
+// AzerothLife (2.0b): .disease <id>  (id = base spell 60030/60032..60036)
+// Contracts a disease on the selected player (or self). Incubates then shows.
+bool ChatHandler::HandleDiseaseCommand(char* args)
+{
+    Player* target = GetSelectedPlayer();
+    if (!target)
+        target = m_session ? m_session->GetPlayer() : nullptr;
+    if (!target)
+    {
+        SendSysMessage(LANG_PLAYER_NOT_FOUND);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    uint32 diseaseId;
+    if (!ExtractUInt32(&args, diseaseId))
+    {
+        SendSysMessage("Usage: .disease <id> (60030 Festering, 60032 Spider Venom, 60033 Rabies, 60034 Filth Fever, 60035 Marsh Fever, 60036 The Plague)");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    bool const valid = diseaseId == 60030 || (diseaseId >= 60032 && diseaseId <= 60036);
+    if (!valid)
+    {
+        SendSysMessage("Invalid disease id. Valid: 60030, 60032, 60033, 60034, 60035, 60036.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    if (target->HasDisease(diseaseId))
+    {
+        PSendSysMessage("%s already carries disease %u.", target->GetName(), diseaseId);
+        return true;
+    }
+
+    target->ContractDisease(diseaseId, true /* skip incubation for testing */);
+    PSendSysMessage("%s contracted disease %u (symptoms applied immediately).",
+        target->GetName(), diseaseId);
+    return true;
+}
+
 static uint32 ReputationRankStrIndex[MAX_REPUTATION_RANK] =
 {
     LANG_REP_HATED,    LANG_REP_HOSTILE, LANG_REP_UNFRIENDLY, LANG_REP_NEUTRAL,

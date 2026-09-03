@@ -8891,6 +8891,74 @@ void ObjectMgr::LoadReputationRewardRate()
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, ">> Loaded %u reputation_reward_rate", count);
 }
 
+// AzerothLife 2.0b (Workstream E): load the two cached disease-sourcing tables
+// once at startup. Consulted per hit-received (creature) / per env tick (zone)
+// without further DB access. disease_id is the base disease spell (6003x).
+void ObjectMgr::LoadDiseaseVectors()
+{
+    m_diseaseCreatureByEntry.clear();
+    m_diseaseCreatureByFamily.clear();
+    m_diseaseCreatureByType.clear();
+    m_diseaseZoneMap.clear();
+
+    uint32 creatureCount = 0;
+    {
+        std::unique_ptr<QueryResult> result(WorldDatabase.Query(
+            "SELECT `match_kind`, `match_value`, `disease_id`, `chance_permille` FROM `al_disease_creature`"));
+        if (result)
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                uint32 matchKind  = fields[0].GetUInt32();
+                uint32 matchValue = fields[1].GetUInt32();
+                DiseaseVector v;
+                v.diseaseId     = fields[2].GetUInt32();
+                v.chancePermille = fields[3].GetUInt16();
+
+                switch (matchKind)
+                {
+                    case 0: m_diseaseCreatureByType[matchValue]   = v; break; // creature type
+                    case 1: m_diseaseCreatureByFamily[matchValue] = v; break; // creature family
+                    case 2: m_diseaseCreatureByEntry[matchValue]  = v; break; // creature entry
+                    default:
+                        sLog.Out(LOG_DBERROR, LOG_LVL_MINIMAL,
+                            "Table `al_disease_creature` has bad match_kind %u (value %u); skipped.", matchKind, matchValue);
+                        continue;
+                }
+                ++creatureCount;
+            }
+            while (result->NextRow());
+        }
+    }
+
+    uint32 zoneCount = 0;
+    {
+        std::unique_ptr<QueryResult> result(WorldDatabase.Query(
+            "SELECT `zone_id`, `area_id`, `disease_id`, `chance_permille` FROM `al_disease_zone`"));
+        if (result)
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                uint32 zoneId = fields[0].GetUInt32();
+                uint32 areaId = fields[1].GetUInt32();
+                DiseaseVector v;
+                v.diseaseId     = fields[2].GetUInt32();
+                v.chancePermille = fields[3].GetUInt16();
+                uint64 key = (uint64(zoneId) << 32) | areaId;
+                m_diseaseZoneMap.emplace(key, v);
+                ++zoneCount;
+            }
+            while (result->NextRow());
+        }
+    }
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "");
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        ">> Loaded %u al_disease_creature and %u al_disease_zone rows", creatureCount, zoneCount);
+}
+
 void ObjectMgr::LoadReputationOnKill()
 {
     uint32 count = 0;

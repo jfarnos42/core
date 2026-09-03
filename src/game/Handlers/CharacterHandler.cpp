@@ -103,6 +103,7 @@ bool LoginQueryHolder::Initialize()
     res &= SetPQuery(PLAYER_LOGIN_QUERY_LOADMAILEDITEMS,     "SELECT `creator_guid`, `gift_creator_guid`, `count`, `duration`, `charges`, `flags`, `enchantments`, `random_property_id`, `durability`, `text`, `mail_id`, `item_guid`, `item_instance`.`item_id`, `generated_loot` FROM `mail_items` JOIN `item_instance` ON `item_guid` = `guid` WHERE `receiver_guid` = '%u'", m_guid.GetCounter());
     res &= SetPQuery(PLAYER_LOGIN_QUERY_FORGOTTEN_SKILLS,    "SELECT `skill`, `value` FROM `character_forgotten_skills` WHERE `guid` = '%u'", m_guid.GetCounter());
     res &= SetPQuery(PLAYER_LOGIN_QUERY_LOADNEEDS,           "SELECT `hunger`, `thirst` FROM `character_needs` WHERE `guid` = '%u'", m_guid.GetCounter());
+    res &= SetPQuery(PLAYER_LOGIN_QUERY_LOADDISEASES,        "SELECT `disease_id`, `stage`, `contracted_at`, `incubation_end`, `next_progress_at`, `last_update` FROM `character_diseases` WHERE `guid` = '%u'", m_guid.GetCounter());
 
     return res;
 }
@@ -611,7 +612,10 @@ void WorldSession::HandlePlayerLogin(LoginQueryHolder *holder)
     // values, now that the player is in world (casting/aura-add is valid here).
     // Only for a fresh load; an already-online relog kept its auras in memory.
     if (!alreadyOnline)
+    {
         pCurrChar->ApplyNeedAurasOnLogin();
+        pCurrChar->ApplyDiseaseAurasOnLogin();  // AzerothLife 2.0b
+    }
 
     static SqlStatementID updChars;
     static SqlStatementID updAccount;
