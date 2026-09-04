@@ -4534,6 +4534,69 @@ bool ChatHandler::HandleProfessionsCommand(char* args)
     return false;
 }
 
+// AzerothLife (Survival S0): GM tooling for the Survival skill and its (empty)
+// content tables. `.survival <setlevel N|grant|reload>`.
+bool ChatHandler::HandleSurvivalCommand(char* args)
+{
+    if (ExtractLiteralArg(&args, "reload"))
+    {
+        sObjectMgr.LoadSurvivalTables();
+        PSendSysMessage("Reloaded Survival tables (al_survival_recipe / al_survival_forage).");
+        return true;
+    }
+
+    if (ExtractLiteralArg(&args, "grant"))
+    {
+        Player* target = GetSelectedPlayer();
+        if (!target)
+            target = m_session ? m_session->GetPlayer() : nullptr;
+        if (!target)
+        {
+            SendSysMessage(LANG_PLAYER_NOT_FOUND);
+            SetSentErrorMessage(true);
+            return false;
+        }
+
+        target->EnsureSurvivalSkill();
+        PSendSysMessage("Granted the Survival skill to %s.", target->GetName());
+        return true;
+    }
+
+    if (ExtractLiteralArg(&args, "setlevel"))
+    {
+        int32 level = 0;
+        if (!ExtractInt32(&args, level))
+        {
+            SendSysMessage("Usage: .survival setlevel <1-300>");
+            SetSentErrorMessage(true);
+            return false;
+        }
+
+        Player* target = GetSelectedPlayer();
+        if (!target)
+            target = m_session ? m_session->GetPlayer() : nullptr;
+        if (!target)
+        {
+            SendSysMessage(LANG_PLAYER_NOT_FOUND);
+            SetSentErrorMessage(true);
+            return false;
+        }
+
+        if (level < 1)
+            level = 1;
+        else if (level > 300)
+            level = 300;
+
+        target->SetSkill(SURVIVAL_SKILL_ID, uint16(level), 300);
+        PSendSysMessage("Set %s's Survival skill to %d/300.", target->GetName(), level);
+        return true;
+    }
+
+    SendSysMessage("Usage: .survival <setlevel N|grant|reload>");
+    SetSentErrorMessage(true);
+    return false;
+}
+
 static uint32 ReputationRankStrIndex[MAX_REPUTATION_RANK] =
 {
     LANG_REP_HATED,    LANG_REP_HOSTILE, LANG_REP_UNFRIENDLY, LANG_REP_NEUTRAL,

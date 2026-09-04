@@ -1208,6 +1208,7 @@ ChatCommand * ChatHandler::getCommandTable()
         { "wound",          SEC_GAMEMASTER,     false, &ChatHandler::HandleWoundCommand,               "", nullptr              },
         { "disease",        SEC_GAMEMASTER,     false, &ChatHandler::HandleDiseaseCommand,             "", nullptr              },
         { "professions",    SEC_GAMEMASTER,     true,  &ChatHandler::HandleProfessionsCommand,         "", nullptr              },
+        { "survival",       SEC_GAMEMASTER,     true,  &ChatHandler::HandleSurvivalCommand,            "", nullptr              },
         { "npc",            SEC_MODERATOR,      false, nullptr,                                        "", npcCommandTable      },
         { "unit",           SEC_MODERATOR,      false, nullptr,                                        "", unitCommandTable     },
         { "pool",           SEC_GAMEMASTER,     true, nullptr,                                         "", poolCommandTable     },

@@ -1516,6 +1516,9 @@ void World::SetInitialWorldSettings()
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Loading Disabled Skills (AzerothLife professions-reset)...");
     sObjectMgr.LoadDisabledSkills();
 
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Loading Survival Tables (AzerothLife Survival S0)...");
+    sObjectMgr.LoadSurvivalTables();
+
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Loading Creature Reputation OnKill Data...");
     sObjectMgr.LoadReputationOnKill();
 

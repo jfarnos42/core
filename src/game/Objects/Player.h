@@ -70,6 +70,10 @@ class BattleGround;
 #define PLAYER_EXPLORED_ZONES_SIZE  64
 #define CORPSE_REPOP_TIME (6 * MINUTE * IN_MILLISECONDS)
 
+// AzerothLife (Survival S0): reuse the vanilla "Survival" SkillLine (category 9,
+// secondary; racemask/classmask 0). Granted to every character, non-removable.
+constexpr uint16 SURVIVAL_SKILL_ID = 142;  // reused vanilla "Survival" SkillLine
+
 enum EnvironmentFlags
 {
     ENVIRONMENT_FLAG_NONE           = 0x00,
@@ -1381,6 +1385,11 @@ class Player final: public Unit
         // skill line and its recipe/profession spells from this character. Runs
         // at login (= the wipe) and on `.professions strip`. Idempotent.
         void StripDisabledProfessions();
+        // AzerothLife (Survival S0): grant the vanilla Survival skill (142) to
+        // this character if missing, at rank 1/300. Preserves the current value
+        // if already present. Non-removable, universal. Runs at character
+        // creation and at login (retro-grant), and from `.survival grant`.
+        void EnsureSurvivalSkill();
         void ResetSpells();
         void LearnDefaultSpells();
         void LearnQuestRewardedSpells();

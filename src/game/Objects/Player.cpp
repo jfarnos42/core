@@ -512,6 +512,7 @@ bool Player::Create(uint32 guidlow, std::string const& name, uint8 race, uint8 c
     InitTaxiNodes();
     InitTalentForLevel();
     InitPrimaryProfessions();                               // to max set before any spell added
+    EnsureSurvivalSkill();                                  // AzerothLife (Survival S0): universal, non-removable
     m_reputationMgr.LoadFromDB(nullptr);
 
     // apply original stats mods before spell loading or item equipment that call before equip _RemoveStatsMods()
@@ -15761,6 +15762,10 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder* holder)
     // both loaded, so strip every deny-listed profession and its recipes here.
     StripDisabledProfessions();
 
+    // AzerothLife (Survival S0): retro-grant the Survival skill to existing
+    // characters and guarantee it is never missing after login.
+    EnsureSurvivalSkill();
+
     // after spell load, learn rewarded spell if need also
     _LoadQuestStatus(holder->TakeResult(PLAYER_LOGIN_QUERY_LOADQUESTSTATUS));
 
@@ -21463,6 +21468,19 @@ void Player::StripDisabledProfessions()
     sLog.Out(LOG_BASIC, LOG_LVL_DETAIL,
         "AzerothLife professions-reset: stripped %zu profession skill(s) and %zu recipe spell(s) from %s.",
         skillsToRemove.size(), spellsToRemove.size(), GetName());
+}
+
+// AzerothLife (Survival S0): give this character the vanilla Survival skill
+// (142) if it is missing, at rank 1 / max 300. If already present, the current
+// value is preserved (never lowered). Survival is NOT in the professions-reset
+// deny-list, so SetSkill's grant guard lets it through. Idempotent: safe to call
+// at creation, at every login (retro-grant for existing chars) and on demand.
+void Player::EnsureSurvivalSkill()
+{
+    if (HasSkill(SURVIVAL_SKILL_ID))
+        return;
+
+    SetSkill(SURVIVAL_SKILL_ID, 1, 300);
 }
 
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_10_2

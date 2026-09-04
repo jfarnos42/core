@@ -163,6 +163,33 @@ typedef std::unordered_map<uint32, DiseaseVector> DiseaseCreatureMap;
 // key are allowed (a zone can carry several), hence a multimap.
 typedef std::unordered_multimap<uint64, DiseaseVector> DiseaseZoneMap;
 
+// AzerothLife (Survival S0): cached, currently-empty Survival content. The
+// tables ship empty in S0 (plumbing only); these structures give later phases
+// (recipes, foraging) a place to land without a schema/loader rewrite.
+struct SurvivalRecipe
+{
+    uint32 recipeId = 0;
+    uint32 productItem = 0;
+    uint32 productQty = 0;
+    uint32 skillReq = 0;
+    uint32 skillGain = 0;
+    bool   requiresCampfire = false;
+};
+struct SurvivalForage
+{
+    uint32 id = 0;
+    uint32 zoneId = 0;
+    uint32 areaId = 0;
+    uint32 itemId = 0;
+    uint16 chancePermille = 0;
+    uint32 minQty = 0;
+    uint32 maxQty = 0;
+    uint32 skillReq = 0;
+    uint32 skillGain = 0;
+};
+typedef std::unordered_map<uint32, SurvivalRecipe> SurvivalRecipeMap;
+typedef std::vector<SurvivalForage> SurvivalForageVector;
+
 typedef std::map<uint32/*player guid*/,uint32/*instance*/> CellCorpseSet;
 struct CellObjectGuids
 {
@@ -1019,6 +1046,7 @@ class ObjectMgr
         void LoadReputationRewardRate();
         void LoadDiseaseVectors();   // AzerothLife 2.0b: al_disease_creature/zone
         void LoadDisabledSkills();   // AzerothLife (professions-reset): al_disabled_skills deny-list
+        void LoadSurvivalTables();   // AzerothLife (Survival S0): al_survival_recipe/forage (empty in S0)
         void LoadReputationOnKill();
         void LoadReputationSpilloverTemplate();
 
@@ -1591,6 +1619,9 @@ class ObjectMgr
         // lines. Populated by LoadDisabledSkills() at startup and by .professions
         // reload. Empty => nothing disabled (feature fully data-reversible).
         std::set<uint32>    m_disabledSkills;
+        // AzerothLife (Survival S0): cached Survival content (empty in S0).
+        SurvivalRecipeMap    m_survivalRecipes;
+        SurvivalForageVector m_survivalForage;
         RepOnKillMap        m_RepOnKillMap;
         RepSpilloverTemplateMap m_RepSpilloverTemplateMap;
 
