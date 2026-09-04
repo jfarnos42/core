@@ -187,8 +187,20 @@ struct SurvivalForage
     uint32 skillReq = 0;
     uint32 skillGain = 0;
 };
+// AzerothLife (Survival v0.1): a gathering node (firewood, etc.). The GO is a
+// vanilla CHEST with lockId=0 (no native lock), so this row IS the skill gate.
+// required_skill = minimum Survival to gather; red_level = the skill level past
+// which the node stops granting skill (grey); skill_gain = points per success.
+struct SurvivalNode
+{
+    uint32 goEntry = 0;
+    uint32 requiredSkill = 0;
+    uint32 redLevel = 0;
+    uint32 skillGain = 0;
+};
 typedef std::unordered_map<uint32, SurvivalRecipe> SurvivalRecipeMap;
 typedef std::vector<SurvivalForage> SurvivalForageVector;
+typedef std::unordered_map<uint32, SurvivalNode> SurvivalNodeMap;
 
 typedef std::map<uint32/*player guid*/,uint32/*instance*/> CellCorpseSet;
 struct CellObjectGuids
@@ -911,6 +923,15 @@ class ObjectMgr
             return m_disabledSkills.find(skillId) != m_disabledSkills.end();
         }
 
+        // AzerothLife (Survival v0.1): is this GO entry a Survival gathering node?
+        // Returns the cached row (skill gate + skill-up params) or nullptr for a
+        // normal chest. O(1) lookup; empty map => nothing gated (data-reversible).
+        SurvivalNode const* GetSurvivalNode(uint32 goEntry) const
+        {
+            SurvivalNodeMap::const_iterator itr = m_survivalNodes.find(goEntry);
+            return itr != m_survivalNodes.end() ? &itr->second : nullptr;
+        }
+
         // AzerothLife (professions-reset): does this spell teach/belong to a
         // disabled skill line? Resolves the spell -> skill-line abilities and
         // checks each against the deny-list. Covers trainer spells, recipes,
@@ -1622,6 +1643,7 @@ class ObjectMgr
         // AzerothLife (Survival S0): cached Survival content (empty in S0).
         SurvivalRecipeMap    m_survivalRecipes;
         SurvivalForageVector m_survivalForage;
+        SurvivalNodeMap      m_survivalNodes;
         RepOnKillMap        m_RepOnKillMap;
         RepSpilloverTemplateMap m_RepSpilloverTemplateMap;
 

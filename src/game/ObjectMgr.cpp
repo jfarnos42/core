@@ -8967,6 +8967,7 @@ void ObjectMgr::LoadSurvivalTables()
 {
     m_survivalRecipes.clear();
     m_survivalForage.clear();
+    m_survivalNodes.clear();
 
     {
         std::unique_ptr<QueryResult> result(WorldDatabase.Query(
@@ -9013,10 +9014,29 @@ void ObjectMgr::LoadSurvivalTables()
         }
     }
 
+    {
+        std::unique_ptr<QueryResult> result(WorldDatabase.Query(
+            "SELECT `go_entry`, `required_skill`, `red_level`, `skill_gain` FROM `al_survival_node`"));
+        if (result)
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                SurvivalNode n;
+                n.goEntry       = fields[0].GetUInt32();
+                n.requiredSkill = fields[1].GetUInt32();
+                n.redLevel      = fields[2].GetUInt32();
+                n.skillGain     = fields[3].GetUInt32();
+                m_survivalNodes[n.goEntry] = n;
+            }
+            while (result->NextRow());
+        }
+    }
+
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "");
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-        ">> Loaded %zu al_survival_recipe and %zu al_survival_forage rows",
-        m_survivalRecipes.size(), m_survivalForage.size());
+        ">> Loaded %zu al_survival_recipe, %zu al_survival_forage and %zu al_survival_node rows",
+        m_survivalRecipes.size(), m_survivalForage.size(), m_survivalNodes.size());
 }
 
 // AzerothLife (professions-reset): load the deny-list of profession skill lines
