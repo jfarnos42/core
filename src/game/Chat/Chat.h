@@ -984,6 +984,7 @@ class ChatHandler
         bool HandleNeedsCommand(char* args);            // AzerothLife: Hunger & Thirst
         bool HandleWoundCommand(char* args);            // AzerothLife: Wounds (2.0b)
         bool HandleDiseaseCommand(char* args);          // AzerothLife: Diseases (2.0b)
+        bool HandleProfessionsCommand(char* args);      // AzerothLife: Professions Reset
         bool HandleDeplenishCommand(char* args);
         bool HandleReplenishCommand(char* args);
         bool HandleModifyMorphCommand(char* args);

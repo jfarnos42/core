@@ -4498,6 +4498,42 @@ bool ChatHandler::HandleDiseaseCommand(char* args)
     return true;
 }
 
+// AzerothLife (professions-reset): .professions <reload|strip>
+//   reload -> re-read the al_disabled_skills deny-list from the world DB (lets you
+//             enable/disable a profession by data without restarting the server).
+//   strip  -> wipe every deny-listed profession + its recipes from the target
+//             player (or self), exactly like the login-strip, without relogging.
+bool ChatHandler::HandleProfessionsCommand(char* args)
+{
+    if (ExtractLiteralArg(&args, "reload"))
+    {
+        sObjectMgr.LoadDisabledSkills();
+        PSendSysMessage("Reloaded al_disabled_skills deny-list.");
+        return true;
+    }
+
+    if (ExtractLiteralArg(&args, "strip"))
+    {
+        Player* target = GetSelectedPlayer();
+        if (!target)
+            target = m_session ? m_session->GetPlayer() : nullptr;
+        if (!target)
+        {
+            SendSysMessage(LANG_PLAYER_NOT_FOUND);
+            SetSentErrorMessage(true);
+            return false;
+        }
+
+        target->StripDisabledProfessions();
+        PSendSysMessage("Stripped disabled professions from %s.", target->GetName());
+        return true;
+    }
+
+    SendSysMessage("Usage: .professions <reload|strip>");
+    SetSentErrorMessage(true);
+    return false;
+}
+
 static uint32 ReputationRankStrIndex[MAX_REPUTATION_RANK] =
 {
     LANG_REP_HATED,    LANG_REP_HOSTILE, LANG_REP_UNFRIENDLY, LANG_REP_NEUTRAL,
