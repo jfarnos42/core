@@ -877,6 +877,19 @@ class ObjectMgr
                 out.push_back(it->second);
         }
 
+        // AzerothLife (professions-reset): is this profession skill line on the
+        // server deny-list (al_disabled_skills)? Cached at startup, O(log n).
+        bool IsSkillDisabled(uint32 skillId) const
+        {
+            return m_disabledSkills.find(skillId) != m_disabledSkills.end();
+        }
+
+        // AzerothLife (professions-reset): does this spell teach/belong to a
+        // disabled skill line? Resolves the spell -> skill-line abilities and
+        // checks each against the deny-list. Covers trainer spells, recipes,
+        // quest-taught spells and the base "Apprentice X" learn spells.
+        bool IsSpellDisabledProfession(uint32 spellId) const;
+
         ReputationOnKillEntry const* GetReputationOnKillEntry(uint32 id) const
         {
             auto itr = m_RepOnKillMap.find(id);
@@ -1005,6 +1018,7 @@ class ObjectMgr
 
         void LoadReputationRewardRate();
         void LoadDiseaseVectors();   // AzerothLife 2.0b: al_disease_creature/zone
+        void LoadDisabledSkills();   // AzerothLife (professions-reset): al_disabled_skills deny-list
         void LoadReputationOnKill();
         void LoadReputationSpilloverTemplate();
 
@@ -1573,6 +1587,10 @@ class ObjectMgr
         DiseaseCreatureMap  m_diseaseCreatureByFamily;
         DiseaseCreatureMap  m_diseaseCreatureByType;
         DiseaseZoneMap      m_diseaseZoneMap;
+        // AzerothLife (professions-reset): cached deny-list of profession skill
+        // lines. Populated by LoadDisabledSkills() at startup and by .professions
+        // reload. Empty => nothing disabled (feature fully data-reversible).
+        std::set<uint32>    m_disabledSkills;
         RepOnKillMap        m_RepOnKillMap;
         RepSpilloverTemplateMap m_RepSpilloverTemplateMap;
 

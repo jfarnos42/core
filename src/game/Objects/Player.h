@@ -1377,6 +1377,10 @@ class Player final: public Unit
         void SendSpellRemoved(uint32 spellId) const;
         void LearnSpell(uint32 spellId, bool dependent, bool talent = false);
         void RemoveSpell(uint32 spellId, bool disabled = false, bool learn_low_rank = true);
+        // AzerothLife (professions-reset): remove every deny-listed profession
+        // skill line and its recipe/profession spells from this character. Runs
+        // at login (= the wipe) and on `.professions strip`. Idempotent.
+        void StripDisabledProfessions();
         void ResetSpells();
         void LearnDefaultSpells();
         void LearnQuestRewardedSpells();

@@ -209,6 +209,13 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
             if (!_player->IsSpellFitByClassAndRace(triggerSpell))
                 continue;
 
+            // AzerothLife (professions-reset): never offer spells that teach a
+            // disabled profession skill line. Filtered at render time so the
+            // underlying npc_trainer data stays intact and reversible.
+            if (sObjectMgr.IsSpellDisabledProfession(tSpell->spell) ||
+                sObjectMgr.IsSpellDisabledProfession(triggerSpell))
+                continue;
+
             TrainerSpellState state = _player->GetTrainerSpellState(tSpell);
 
             SendTrainerSpellHelper(data, tSpell, triggerSpell, state, fDiscountMod, can_learn_primary_prof);
@@ -226,6 +233,11 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
             uint32 triggerSpell = sSpellMgr.GetSpellEntry(tSpell->spell)->EffectTriggerSpell[0];
 
             if (!_player->IsSpellFitByClassAndRace(triggerSpell))
+                continue;
+
+            // AzerothLife (professions-reset): hide denied-profession spells.
+            if (sObjectMgr.IsSpellDisabledProfession(tSpell->spell) ||
+                sObjectMgr.IsSpellDisabledProfession(triggerSpell))
                 continue;
 
             TrainerSpellState state = _player->GetTrainerSpellState(tSpell);
@@ -301,6 +313,18 @@ void WorldSession::HandleTrainerBuySpellOpcode(WorldPackets::Npc::TrainerBuySpel
     {
         SendTrainingFailure(packet.guid, packet.spellId, TRAIN_FAIL_NOT_ENOUGH_SKILL);
         return;
+    }
+
+    // AzerothLife (professions-reset): refuse to teach denied professions even if
+    // a stale/cheated client request slips a hidden trainer spell through.
+    {
+        uint32 taughtSpell = sSpellMgr.GetSpellEntry(trainer_spell->spell)->EffectTriggerSpell[0];
+        if (sObjectMgr.IsSpellDisabledProfession(trainer_spell->spell) ||
+            sObjectMgr.IsSpellDisabledProfession(taughtSpell))
+        {
+            SendTrainingFailure(packet.guid, packet.spellId, TRAIN_FAIL_UNAVAILABLE);
+            return;
+        }
     }
 
     SpellEntry const* proto = sSpellMgr.GetSpellEntry(trainer_spell->spell);

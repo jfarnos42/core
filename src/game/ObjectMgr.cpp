@@ -8959,6 +8959,51 @@ void ObjectMgr::LoadDiseaseVectors()
         ">> Loaded %u al_disease_creature and %u al_disease_zone rows", creatureCount, zoneCount);
 }
 
+// AzerothLife (professions-reset): load the deny-list of profession skill lines
+// once at startup (and on `.professions reload`) into a cached set. The core
+// consults it when rendering trainers, when learning spells/skills and at login
+// (the wipe). Reactivating a profession = delete its row + reload; no recompile.
+void ObjectMgr::LoadDisabledSkills()
+{
+    m_disabledSkills.clear();
+
+    uint32 count = 0;
+    std::unique_ptr<QueryResult> result(WorldDatabase.Query(
+        "SELECT `skill_id` FROM `al_disabled_skills`"));
+    if (result)
+    {
+        do
+        {
+            Field* fields = result->Fetch();
+            uint32 skillId = fields[0].GetUInt32();
+            m_disabledSkills.insert(skillId);
+            ++count;
+        }
+        while (result->NextRow());
+    }
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "");
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, ">> Loaded %u disabled skills", count);
+}
+
+// AzerothLife (professions-reset): a spell "belongs to" a disabled profession if
+// any of its skill-line ability rows references a denied skill line. Used to hide
+// trainer entries, refuse learning and strip recipes from the spellbook on login.
+bool ObjectMgr::IsSpellDisabledProfession(uint32 spellId) const
+{
+    if (!spellId || m_disabledSkills.empty())
+        return false;
+
+    SkillLineAbilityMapBounds bounds = sSpellMgr.GetSkillLineAbilityMapBoundsBySpellId(spellId);
+    for (SkillLineAbilityMap::const_iterator itr = bounds.first; itr != bounds.second; ++itr)
+    {
+        if (SkillLineAbilityEntry const* pAbility = itr->second)
+            if (IsSkillDisabled(pAbility->skillId))
+                return true;
+    }
+    return false;
+}
+
 void ObjectMgr::LoadReputationOnKill()
 {
     uint32 count = 0;

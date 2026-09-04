@@ -3837,6 +3837,12 @@ bool Player::IsNeedCastPassiveLikeSpellAtLearn(SpellEntry const* spellInfo) cons
 
 void Player::LearnSpell(uint32 spellId, bool dependent, bool talent)
 {
+    // AzerothLife (professions-reset): central guard. Never learn a spell that
+    // teaches a disabled profession skill line, whatever the source (trainer,
+    // recipe item, quest reward). Reversible: re-enable the skill line to allow.
+    if (sObjectMgr.IsSpellDisabledProfession(spellId))
+        return;
+
     PlayerSpellMap::iterator itr = m_spells.find(spellId);
 
     bool disabled = (itr != m_spells.end()) ? itr->second.disabled : false;
@@ -6265,6 +6271,12 @@ void Player::UpdateSkillsToMaxSkillsForLevel()
 void Player::SetSkill(uint16 id, uint16 currVal, uint16 maxVal, uint16 step /*=0*/)
 {
     if (!id)
+        return;
+
+    // AzerothLife (professions-reset): central guard. Refuse to GRANT a disabled
+    // profession skill line (currVal > 0) from any source. Removal (currVal == 0)
+    // is always allowed so the login-strip and .professions strip can wipe them.
+    if (currVal && sObjectMgr.IsSkillDisabled(id))
         return;
 
     SkillStatusMap::iterator itr = m_skillStatusMap.find(id);
@@ -15745,6 +15757,10 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder* holder)
     InitTalentForLevel();
     LearnDefaultSpells();
 
+    // AzerothLife (professions-reset): the wipe. Skills and the spellbook are now
+    // both loaded, so strip every deny-listed profession and its recipes here.
+    StripDisabledProfessions();
+
     // after spell load, learn rewarded spell if need also
     _LoadQuestStatus(holder->TakeResult(PLAYER_LOGIN_QUERY_LOADQUESTSTATUS));
 
@@ -21404,6 +21420,49 @@ void Player::_LoadSkills(std::unique_ptr<QueryResult> result)
         SetUInt32Value(PLAYER_SKILL_VALUE_INDEX(count), 0);
         SetUInt32Value(PLAYER_SKILL_BONUS_INDEX(count), 0);
     }
+}
+
+// AzerothLife (professions-reset): the wipe. Remove any deny-listed profession
+// skill line still on the character and every recipe/profession spell that
+// teaches a disabled skill line. Called at login (after skills AND spells are
+// loaded) and on `.professions strip`. The normal save path persists the change
+// (SetSkill -> SKILL_DELETED, RemoveSpell -> PLAYERSPELL_REMOVED). Idempotent:
+// each character is caught on its next login until the deny-list is cleared.
+void Player::StripDisabledProfessions()
+{
+    // Snapshot ids first — SetSkill/RemoveSpell mutate the underlying maps.
+    std::vector<uint16> skillsToRemove;
+    for (auto const& itr : m_skillStatusMap)
+    {
+        if (itr.second.uState == SKILL_DELETED)
+            continue;
+        if (sObjectMgr.IsSkillDisabled(itr.first))
+            skillsToRemove.push_back(itr.first);
+    }
+
+    std::vector<uint32> spellsToRemove;
+    for (auto const& itr : m_spells)
+    {
+        if (itr.second.state == PLAYERSPELL_REMOVED)
+            continue;
+        if (sObjectMgr.IsSpellDisabledProfession(itr.first))
+            spellsToRemove.push_back(itr.first);
+    }
+
+    if (skillsToRemove.empty() && spellsToRemove.empty())
+        return;
+
+    // Remove recipe/profession spells first, then drop the skill lines. Dropping
+    // a skill also unlearns its auto-trained spells via UpdateSkillTrainedSpells.
+    for (uint32 spellId : spellsToRemove)
+        RemoveSpell(spellId, false, false);
+
+    for (uint16 skillId : skillsToRemove)
+        SetSkill(skillId, 0, 0);
+
+    sLog.Out(LOG_BASIC, LOG_LVL_DETAIL,
+        "AzerothLife professions-reset: stripped %zu profession skill(s) and %zu recipe spell(s) from %s.",
+        skillsToRemove.size(), spellsToRemove.size(), GetName());
 }
 
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_10_2

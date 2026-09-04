@@ -1513,6 +1513,9 @@ void World::SetInitialWorldSettings()
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Loading Disease Vectors (AzerothLife 2.0b)...");
     sObjectMgr.LoadDiseaseVectors();
 
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Loading Disabled Skills (AzerothLife professions-reset)...");
+    sObjectMgr.LoadDisabledSkills();
+
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Loading Creature Reputation OnKill Data...");
     sObjectMgr.LoadReputationOnKill();
 
