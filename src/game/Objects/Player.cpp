@@ -6010,6 +6010,9 @@ bool Player::UpdateGatherSkill(uint32 skillId, uint32 skillValue, uint32 redLeve
     // For skinning and Mining chance decrease with level. 1-74 - no decrease, 75-149 - 2 times, 225-299 - 8 times
     switch (skillId)
     {
+        // AzerothLife (Survival v0.1): Survival gathering uses the flat herbalism
+        // curve (no level-based decrease); it is a secondary skill like herbalism.
+        case SURVIVAL_SKILL_ID:
         case SKILL_HERBALISM:
         case SKILL_LOCKPICKING:
             return UpdateSkillPro(skillId, SkillGainChance(skillValue, redLevel + 100, redLevel + 50, redLevel + 25) * multiplicator, gatheringSkillGain);
@@ -8417,11 +8420,30 @@ void Player::SendLoot(ObjectGuid guid, LootType lootType, Player const* pVictim)
                     return;
                 }
 
+            // AzerothLife (Survival v0.1): Survival gathering nodes are vanilla
+            // CHESTs with lockId=0, so there is no native lock check — this hook
+            // IS the skill gate. Chest loot is served here (not in GameObject::Use,
+            // whose CHEST case only runs scripts), so this is the real choke point.
+            // GOs absent from al_survival_node behave as ordinary chests, untouched.
+            SurvivalNode const* survivalNode = sObjectMgr.GetSurvivalNode(go->GetEntry());
+            if (survivalNode && GetSkillValuePure(SURVIVAL_SKILL_ID) < survivalNode->requiredSkill)
+            {
+                GetSession()->SendNotification("Requires Survival %u.", survivalNode->requiredSkill);
+                SendLootRelease(guid);
+                return;
+            }
+
             loot = &go->loot;
 
             // generate loot only if ready for open and spawned in world
             if (go->getLootState() == GO_READY && go->isSpawned())
             {
+                // AzerothLife (Survival v0.1): grant the skill-up on a fresh gather
+                // (first open, before the loot is generated below). Reopening a
+                // partially-looted node is GO_ACTIVATED, so this never double-grants.
+                if (survivalNode)
+                    UpdateGatherSkill(SURVIVAL_SKILL_ID, GetSkillValuePure(SURVIVAL_SKILL_ID), survivalNode->redLevel, 1);
+
                 uint32 lootId =  go->GetGOInfo()->GetLootId();
                 // Entry 0 in fishing loot template used for store junk fish loot at fishing fail it junk allowed by config option
                 // this is overwrite fishinghole loot for example
@@ -21477,10 +21499,16 @@ void Player::StripDisabledProfessions()
 // at creation, at every login (retro-grant for existing chars) and on demand.
 void Player::EnsureSurvivalSkill()
 {
-    if (HasSkill(SURVIVAL_SKILL_ID))
-        return;
+    if (!HasSkill(SURVIVAL_SKILL_ID))
+        SetSkill(SURVIVAL_SKILL_ID, 1, 300);
 
-    SetSkill(SURVIVAL_SKILL_ID, 1, 300);
+    // AzerothLife (Survival v0.1 gathering ship): the native "recipe book" trade
+    // spell (60040) is DEFERRED to the follow-up book step, which ships it in
+    // spell_template + Spell.dbc + SkillLineAbility.dbc (client/CDN). Learning it
+    // before it exists only spams the log, so the grant is disabled here until
+    // then. Re-enable this block when the book is deployed.
+    // if (!HasSpell(SURVIVAL_TRADE_SPELL))
+    //     LearnSpell(SURVIVAL_TRADE_SPELL, false);
 }
 
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_10_2

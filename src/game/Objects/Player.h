@@ -73,6 +73,10 @@ class BattleGround;
 // AzerothLife (Survival S0): reuse the vanilla "Survival" SkillLine (category 9,
 // secondary; racemask/classmask 0). Granted to every character, non-removable.
 constexpr uint16 SURVIVAL_SKILL_ID = 142;  // reused vanilla "Survival" SkillLine
+// AzerothLife (Survival v0.1): the native "recipe book" trade spell (ships empty).
+// Created by the PM in spell_template + Spell.dbc + SkillLineAbility.dbc (skill 142).
+// Granted to every character via EnsureSurvivalSkill() so all have the skill tab.
+constexpr uint32 SURVIVAL_TRADE_SPELL = 60040;
 
 enum EnvironmentFlags
 {
