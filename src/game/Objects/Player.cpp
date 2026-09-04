@@ -21502,11 +21502,13 @@ void Player::EnsureSurvivalSkill()
     if (!HasSkill(SURVIVAL_SKILL_ID))
         SetSkill(SURVIVAL_SKILL_ID, 1, 300);
 
-    // AzerothLife (Survival v0.1): grant the native "recipe book" trade spell so
-    // every character shows Survival in the skills/professions tab. Ships empty;
-    // recipes land in later phases. Retro-grants on login for existing chars.
-    if (!HasSpell(SURVIVAL_TRADE_SPELL))
-        LearnSpell(SURVIVAL_TRADE_SPELL, false);
+    // AzerothLife (Survival v0.1 gathering ship): the native "recipe book" trade
+    // spell (60040) is DEFERRED to the follow-up book step, which ships it in
+    // spell_template + Spell.dbc + SkillLineAbility.dbc (client/CDN). Learning it
+    // before it exists only spams the log, so the grant is disabled here until
+    // then. Re-enable this block when the book is deployed.
+    // if (!HasSpell(SURVIVAL_TRADE_SPELL))
+    //     LearnSpell(SURVIVAL_TRADE_SPELL, false);
 }
 
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_10_2
