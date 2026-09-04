@@ -8959,6 +8959,66 @@ void ObjectMgr::LoadDiseaseVectors()
         ">> Loaded %u al_disease_creature and %u al_disease_zone rows", creatureCount, zoneCount);
 }
 
+// AzerothLife (Survival S0): load the Survival content tables into cached
+// structures. Both ship EMPTY in S0 — this is plumbing only, so later phases
+// (recipes, foraging) plug in without a loader/schema rewrite. Reloadable via
+// `.survival reload`. No consumer yet; the caches are simply populated & logged.
+void ObjectMgr::LoadSurvivalTables()
+{
+    m_survivalRecipes.clear();
+    m_survivalForage.clear();
+
+    {
+        std::unique_ptr<QueryResult> result(WorldDatabase.Query(
+            "SELECT `recipe_id`, `product_item`, `product_qty`, `skill_req`, `skill_gain`, `requires_campfire` FROM `al_survival_recipe`"));
+        if (result)
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                SurvivalRecipe r;
+                r.recipeId         = fields[0].GetUInt32();
+                r.productItem      = fields[1].GetUInt32();
+                r.productQty       = fields[2].GetUInt32();
+                r.skillReq         = fields[3].GetUInt32();
+                r.skillGain        = fields[4].GetUInt32();
+                r.requiresCampfire = fields[5].GetUInt8() != 0;
+                m_survivalRecipes[r.recipeId] = r;
+            }
+            while (result->NextRow());
+        }
+    }
+
+    {
+        std::unique_ptr<QueryResult> result(WorldDatabase.Query(
+            "SELECT `id`, `zone_id`, `area_id`, `item_id`, `chance_permille`, `min_qty`, `max_qty`, `skill_req`, `skill_gain` FROM `al_survival_forage`"));
+        if (result)
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                SurvivalForage f;
+                f.id             = fields[0].GetUInt32();
+                f.zoneId         = fields[1].GetUInt32();
+                f.areaId         = fields[2].GetUInt32();
+                f.itemId         = fields[3].GetUInt32();
+                f.chancePermille = fields[4].GetUInt16();
+                f.minQty         = fields[5].GetUInt32();
+                f.maxQty         = fields[6].GetUInt32();
+                f.skillReq       = fields[7].GetUInt32();
+                f.skillGain      = fields[8].GetUInt32();
+                m_survivalForage.push_back(f);
+            }
+            while (result->NextRow());
+        }
+    }
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "");
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        ">> Loaded %zu al_survival_recipe and %zu al_survival_forage rows",
+        m_survivalRecipes.size(), m_survivalForage.size());
+}
+
 // AzerothLife (professions-reset): load the deny-list of profession skill lines
 // once at startup (and on `.professions reload`) into a cached set. The core
 // consults it when rendering trainers, when learning spells/skills and at login
