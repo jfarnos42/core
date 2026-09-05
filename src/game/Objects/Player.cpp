@@ -21477,10 +21477,20 @@ void Player::StripDisabledProfessions()
 // at creation, at every login (retro-grant for existing chars) and on demand.
 void Player::EnsureSurvivalSkill()
 {
-    if (HasSkill(SURVIVAL_SKILL_ID))
+    // Survival is a real secondary profession everyone is born with. It is granted by
+    // LEARNING the Apprentice trade spell (not a raw SetSkill), so the client renders it
+    // as a proper profession — Survival 1/75 (Apprentice) with a native recipe book —
+    // exactly like Cooking. The learn-skill node caps it at 75 (step 1 * 75).
+    if (HasSpell(SURVIVAL_APPRENTICE_SPELL_ID))
         return;
 
-    SetSkill(SURVIVAL_SKILL_ID, 1, 300);
+    // Reconcile characters granted the bare skill by the old S0 build (SetSkill 1/300),
+    // which displayed as a broken 5/5: drop it first so LearnSpell re-adds it cleanly at
+    // 1/75 — otherwise SetSkill's std::max(newMax, currentMax) would keep the stale 300.
+    if (HasSkill(SURVIVAL_SKILL_ID))
+        SetSkill(SURVIVAL_SKILL_ID, 0, 0);
+
+    LearnSpell(SURVIVAL_APPRENTICE_SPELL_ID, false);
 }
 
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_10_2
