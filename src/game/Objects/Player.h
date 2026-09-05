@@ -73,6 +73,11 @@ class BattleGround;
 // AzerothLife (Survival S0): reuse the vanilla "Survival" SkillLine (category 9,
 // secondary; racemask/classmask 0). Granted to every character, non-removable.
 constexpr uint16 SURVIVAL_SKILL_ID = 142;  // reused vanilla "Survival" SkillLine
+// AzerothLife (Survival — profession skeleton): the Apprentice trade spell. Learning
+// it grants the Survival profession properly (skill 142 at 1/75 via SpellLearnSkill +
+// SkillTiers) and opens the native recipe book — clone of Apprentice Cooking (2550).
+// 60041/60042/60043 are RESERVED for Journeyman/Expert/Artisan (future quest unlocks).
+constexpr uint32 SURVIVAL_APPRENTICE_SPELL_ID = 60040;
 
 enum EnvironmentFlags
 {
